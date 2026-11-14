@@ -1,0 +1,2 @@
+# vainfo, for the check of hardware decode
+libva-utils

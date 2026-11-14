@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=Android session of Waydroid (x86-linux-htpc)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+# The session runs in the background, so that an Android app starts in a
+# few seconds from its tile. files/android-app of the component
+# android-apps shows the Android interface.
+ExecStart=/usr/bin/waydroid session start
+ExecStop=/usr/bin/waydroid session stop
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

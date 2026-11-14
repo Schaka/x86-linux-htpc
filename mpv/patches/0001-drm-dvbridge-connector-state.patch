@@ -1,0 +1,324 @@
+DRM connector state for CB1.
+
+Adds --drm-dvbridge to the DRM output. It takes the mode dolby-vision or
+hdr10. The DRM output sets the connector, CRTC and plane properties of the
+mode while the video plays, and sets the old values back at the end.
+docs/cb1-integration.md of x86-linux-htpc describes the properties.
+
+License: the license of mpv.
+diff --git a/video/out/drm_atomic.c b/video/out/drm_atomic.c
+index ffdaa39..0a16b54 100644
+--- a/video/out/drm_atomic.c
++++ b/video/out/drm_atomic.c
+@@ -17,6 +17,7 @@
+ 
+ #include <errno.h>
+ #include <inttypes.h>
++#include <string.h>
+ 
+ #include "common/common.h"
+ #include "common/msg.h"
+@@ -404,6 +405,129 @@ bool drm_atomic_save_old_state(struct drm_atomic_context *ctx)
+     return ret;
+ }
+ 
++static bool drm_object_enum_value(struct drm_object *object, const char *name,
++                                  const char *enum_name, uint64_t *value)
++{
++    for (int i = 0; i < object->props->count_props; i++) {
++        drmModePropertyRes *info = object->props_info[i];
++        if (strcmp(info->name, name))
++            continue;
++        if (!(info->flags & DRM_MODE_PROP_ENUM))
++            return false;
++        for (int j = 0; j < info->count_enums; j++) {
++            if (!strcmp(info->enums[j].name, enum_name)) {
++                *value = info->enums[j].value;
++                return true;
++            }
++        }
++        return false;
++    }
++    return false;
++}
++
++// TV-led Dolby Vision carries its metadata in the pixels of the picture.
++// The kernel sends the Dolby Vision packet while DVBRIDGE_DV_STANDARD_LAB
++// is 1, and the pixels must reach the HDMI link unchanged: 8 bits for each
++// color, full range, and no color or gamma processing on the way.
++// The HDR10 output of CB1 needs the same clean path with 10 bits. The
++// normal HDR code sets the HDR metadata, the colorspace and
++// DVBRIDGE_HDR10_DEEP_COLOR later, because the kernel accepts the last
++// one only in the same commit as the first two.
++bool drm_atomic_stage_dvbridge(struct mp_log *log, drmModeAtomicReqPtr request,
++                               struct drm_atomic_context *ctx, bool hdr10)
++{
++    const struct {
++        struct drm_object *object;
++        const char *name;
++        uint64_t value;
++        const char *enum_name;
++        bool required;
++        // The blob of the old owner can be gone at the restore. Restore no
++        // blob, because the next owner sets its own blobs anyway.
++        bool blob;
++    } settings[] = {
++        {ctx->connector, "DVBRIDGE_DV_STANDARD_LAB", !hdr10, NULL, !hdr10, false},
++        {ctx->connector, "DVBRIDGE_HDR10_DEEP_COLOR", 0, NULL, hdr10, false},
++        {ctx->connector, "HDR_OUTPUT_METADATA", 0, NULL, false, true},
++        {ctx->connector, "max bpc", hdr10 ? 10 : 8, NULL, true, false},
++        {ctx->connector, "Broadcast RGB", 0, "Full", true, false},
++        {ctx->connector, "Colorspace", 0, "Default", true, false},
++        {ctx->crtc, "CTM", 0, NULL, false, true},
++        {ctx->crtc, "GAMMA_LUT", 0, NULL, false, true},
++        {ctx->crtc, "DEGAMMA_LUT", 0, NULL, false, true},
++        {ctx->draw_plane, "rotation", DRM_MODE_ROTATE_0, NULL, false, false},
++        {ctx->draw_plane, "alpha", 0xffff, NULL, false, false},
++        {ctx->draw_plane, "pixel blend mode", 0, "None", false, false},
++        {ctx->draw_plane, "COLOR_PIPELINE", 0, NULL, false, false},
++    };
++    mp_assert(MP_ARRAY_SIZE(settings) <= DRM_ATOMIC_DVBRIDGE_MAX);
++
++    struct drm_atomic_state *old = &ctx->old_state;
++    old->num_dvbridge = 0;
++    for (int i = 0; i < MP_ARRAY_SIZE(settings); i++) {
++        uint64_t current, value = settings[i].value;
++        char *name = (char *)settings[i].name;
++        bool present = drm_object_get_property(settings[i].object, name, &current) >= 0;
++        if (present && settings[i].enum_name)
++            present = drm_object_enum_value(settings[i].object, name,
++                                            settings[i].enum_name, &value);
++        if (!present) {
++            if (settings[i].required) {
++                mp_err(log, "The DRM property \"%s\" is missing. CB1 output "
++                       "needs the patched kernel.\n", name);
++                return false;
++            }
++            continue;
++        }
++        if (drm_object_set_property(request, settings[i].object, name, value) < 0)
++            return false;
++        old->dvbridge[old->num_dvbridge++] = (struct drm_atomic_saved_value) {
++            settings[i].object, settings[i].name, settings[i].blob ? 0 : current,
++        };
++    }
++
++    // The kernel accepts TV-led Dolby Vision only while the draw plane is
++    // the single plane on the CRTC, because a second plane changes pixels.
++    // The HDR10 output keeps the same rule, so a cursor never shows.
++    // A compositor can leave its cursor plane on at a VT switch. These
++    // planes are not restored, because the compositor sets all its planes
++    // again when it gets the display back.
++    drmModePlaneRes *planes = drmModeGetPlaneResources(ctx->fd);
++    if (!planes)
++        return false;
++    bool ok = true;
++    for (uint32_t i = 0; i < planes->count_planes && ok; i++) {
++        if (planes->planes[i] == ctx->draw_plane->id)
++            continue;
++        drmModePlane *plane = drmModeGetPlane(ctx->fd, planes->planes[i]);
++        bool active = plane && plane->crtc_id == ctx->crtc->id;
++        drmModeFreePlane(plane);
++        if (!active)
++            continue;
++        struct drm_object *object = drm_object_create(log, ctx->fd, planes->planes[i],
++                                                      DRM_MODE_OBJECT_PLANE);
++        ok = object &&
++             drm_object_set_property(request, object, "FB_ID", 0) >= 0 &&
++             drm_object_set_property(request, object, "CRTC_ID", 0) >= 0;
++        if (object)
++            drm_object_free(object);
++    }
++    drmModeFreePlaneResources(planes);
++    return ok;
++}
++
++bool drm_atomic_restore_dvbridge(drmModeAtomicReqPtr request, struct drm_atomic_context *ctx)
++{
++    bool ret = true;
++    for (int i = 0; i < ctx->old_state.num_dvbridge; i++) {
++        struct drm_atomic_saved_value *saved = &ctx->old_state.dvbridge[i];
++        if (0 > drm_object_set_property(request, saved->object, (char *)saved->name, saved->value))
++            ret = false;
++    }
++    ctx->old_state.num_dvbridge = 0;
++    return ret;
++}
++
+ bool drm_atomic_restore_old_state(drmModeAtomicReqPtr request, struct drm_atomic_context *ctx)
+ {
+     if (!ctx->old_state.saved)
+diff --git a/video/out/drm_atomic.h b/video/out/drm_atomic.h
+index 499aa33..973d485 100644
+--- a/video/out/drm_atomic.h
++++ b/video/out/drm_atomic.h
+@@ -43,6 +43,14 @@ struct drm_atomic_plane_state {
+     uint64_t zpos;
+ };
+ 
++#define DRM_ATOMIC_DVBRIDGE_MAX 16
++
++struct drm_atomic_saved_value {
++    struct drm_object *object;
++    const char *name;
++    uint64_t value;
++};
++
+ // Used to store the restore state for VT switching and uninit
+ struct drm_atomic_state {
+     bool saved;
+@@ -56,6 +64,9 @@ struct drm_atomic_state {
+     } crtc;
+     struct drm_atomic_plane_state draw_plane;
+     struct drm_atomic_plane_state drmprime_video_plane;
++    // The values that drm_atomic_stage_dvbridge() changed
++    struct drm_atomic_saved_value dvbridge[DRM_ATOMIC_DVBRIDGE_MAX];
++    int num_dvbridge;
+ };
+ 
+ struct drm_object {
+@@ -92,6 +103,9 @@ struct drm_atomic_context *drm_atomic_create_context(struct mp_log *log, int fd,
+ void drm_atomic_destroy_context(struct drm_atomic_context *ctx);
+ 
+ bool drm_atomic_save_old_state(struct drm_atomic_context *ctx);
++bool drm_atomic_stage_dvbridge(struct mp_log *log, drmModeAtomicReqPtr request,
++                               struct drm_atomic_context *ctx, bool hdr10);
++bool drm_atomic_restore_dvbridge(drmModeAtomicReqPtr request, struct drm_atomic_context *ctx);
+ bool drm_atomic_restore_old_state(drmModeAtomicReq *request, struct drm_atomic_context *ctx);
+ 
+ bool drm_mode_ensure_blob(int fd, struct drm_mode *mode);
+diff --git a/video/out/drm_common.c b/video/out/drm_common.c
+index ffc5ebf..9ea0103 100644
+--- a/video/out/drm_common.c
++++ b/video/out/drm_common.c
+@@ -104,6 +104,8 @@ const struct m_sub_options drm_conf = {
+         {"drm-draw-surface-size", OPT_SIZE_BOX(draw_surface_size)},
+         {"drm-vrr-enabled", OPT_CHOICE(vrr_enabled,
+             {"no", 0}, {"yes", 1}, {"auto", -1})},
++        {"drm-dvbridge", OPT_CHOICE(dvbridge, {"no", DRM_DVBRIDGE_OFF},
++            {"dolby-vision", DRM_DVBRIDGE_DOLBY_VISION}, {"hdr10", DRM_DVBRIDGE_HDR10})},
+         {0},
+     },
+     .defaults = &(const struct drm_opts) {
+@@ -385,6 +387,12 @@ bool vo_drm_acquire_crtc(struct vo_drm_state *drm)
+         }
+     }
+ 
++    if (drm->opts->dvbridge && !drm_atomic_stage_dvbridge(drm->log, request, atomic_ctx,
++                                       drm->opts->dvbridge == DRM_DVBRIDGE_HDR10)) {
++        MP_ERR(drm, "Could not set the DRM state for CB1\n");
++        goto err;
++    }
++
+     drm_object_set_property(request, atomic_ctx->draw_plane, "FB_ID",   drm->fb->id);
+     drm_object_set_property(request, atomic_ctx->draw_plane, "CRTC_ID", drm->crtc_id);
+     drm_object_set_property(request, atomic_ctx->draw_plane, "SRC_X",   0);
+@@ -421,6 +429,21 @@ void vo_drm_release_crtc(struct vo_drm_state *drm)
+ 
+     bool success = true;
+     struct drm_atomic_context *atomic_ctx = drm->atomic_context;
++
++    // The CB1 values go back in a commit of their own, so that a failed
++    // restore of the old mode never leaves the connector in Dolby Vision
++    // mode. The next owner of the display sets its own mode anyway.
++    if (atomic_ctx->old_state.num_dvbridge) {
++        drmModeAtomicReqPtr dv_request = drmModeAtomicAlloc();
++        if (!dv_request || !drm_atomic_restore_dvbridge(dv_request, atomic_ctx)) {
++            MP_WARN(drm, "Could not prepare the DRM state after CB1\n");
++        } else if (drmModeAtomicCommit(drm->fd, dv_request, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL)) {
++            MP_WARN(drm, "Could not restore the DRM state after CB1: %s\n",
++                    mp_strerror(errno));
++        }
++        drmModeAtomicFree(dv_request);
++    }
++
+     drmModeAtomicReqPtr request = drmModeAtomicAlloc();
+     if (!request) {
+         MP_ERR(drm, "Failed to allocate drm atomic request\n");
+@@ -1355,9 +1378,32 @@ double vo_drm_get_display_fps(struct vo_drm_state *drm)
+     return mode_get_Hz(&drm->mode.mode);
+ }
+ 
++// The HDR10 output of CB1 has 10 bits. Without DVBRIDGE_HDR10_DEEP_COLOR,
++// the kernel can choose an 8-bit link, which shows banding. With it, the
++// kernel refuses a mode that has no 10-bit link, for example on an HDMI
++// port without the bandwidth. Then the output stays HDR10 with 8 bits.
++static void set_hdr10_deep_color(struct vo_drm_state *drm, bool enable)
++{
++    struct drm_atomic_context *atomic_ctx = drm->atomic_context;
++    drm_object_set_property(atomic_ctx->request, atomic_ctx->connector,
++                            "DVBRIDGE_HDR10_DEEP_COLOR", enable);
++    if (!enable || !drmModeAtomicCommit(drm->fd, atomic_ctx->request,
++                                        DRM_MODE_ATOMIC_TEST_ONLY |
++                                        DRM_MODE_ATOMIC_ALLOW_MODESET, NULL))
++        return;
++    MP_WARN(drm, "The display link has no 10 bits for this mode. "
++            "HDR10 goes out with 8 bits.\n");
++    drm_object_set_property(atomic_ctx->request, atomic_ctx->connector,
++                            "DVBRIDGE_HDR10_DEEP_COLOR", 0);
++}
++
+ bool vo_drm_set_hdr_metadata(struct vo *vo, bool force_sdr)
+ {
+     struct vo_drm_state *drm = vo->drm;
++    // TV-led Dolby Vision forbids HDR metadata on the connector. The
++    // kernel sends the Dolby Vision packet instead.
++    if (drm->opts->dvbridge == DRM_DVBRIDGE_DOLBY_VISION)
++        return false;
+     struct mp_image_params target_params = vo_get_target_params(vo);
+     if (!force_sdr && (pl_color_space_equal(&target_params.color, &drm->target_params.color) ||
+         !target_params.w || !target_params.h))
+@@ -1399,6 +1445,8 @@ bool vo_drm_set_hdr_metadata(struct vo *vo, bool force_sdr)
+     };
+     drmModeCreatePropertyBlob(drm->fd, &metadata, sizeof(metadata), &drm->hdr.blob_id);
+     drm_object_set_property(atomic_ctx->request, atomic_ctx->connector, "HDR_OUTPUT_METADATA", drm->hdr.blob_id);
++    if (drm->opts->dvbridge == DRM_DVBRIDGE_HDR10)
++        set_hdr10_deep_color(drm, !use_sdr && target_params.color.transfer == PL_COLOR_TRC_PQ);
+     return true;
+ }
+ 
+diff --git a/video/out/drm_common.h b/video/out/drm_common.h
+index ad984e9..4fab3b3 100644
+--- a/video/out/drm_common.h
++++ b/video/out/drm_common.h
+@@ -108,6 +108,14 @@ struct drm_opts {
+     int drm_format;
+     struct m_geometry draw_surface_size;
+     int vrr_enabled;
++    int dvbridge;
++};
++
++// The CB1 output modes of --drm-dvbridge. The values match --cb1.
++enum drm_dvbridge_mode {
++    DRM_DVBRIDGE_OFF,
++    DRM_DVBRIDGE_DOLBY_VISION,
++    DRM_DVBRIDGE_HDR10,
+ };
+ 
+ struct vt_switcher {
+diff --git a/video/out/opengl/context_drm_egl.c b/video/out/opengl/context_drm_egl.c
+index fc78f13..b78f128 100644
+--- a/video/out/opengl/context_drm_egl.c
++++ b/video/out/opengl/context_drm_egl.c
+@@ -294,12 +294,19 @@ static void update_framebuffer_from_bo(struct ra_ctx *ctx, struct gbm_bo *bo)
+         flags = DRM_MODE_FB_MODIFIERS;
+     }
+ 
++    // CB1 needs a render target with four 8-bit channels, and the kernel
++    // accepts TV-led Dolby Vision only on an XRGB8888 plane. So mpv renders
++    // into ARGB8888 and shows the same buffer as XRGB8888, as Kodi does.
++    uint32_t fb_format = p->gbm_format;
++    if (drm->opts->dvbridge == DRM_DVBRIDGE_DOLBY_VISION && fb_format == GBM_FORMAT_ARGB8888)
++        fb_format = GBM_FORMAT_XRGB8888;
++
+     int ret = drmModeAddFB2WithModifiers(fb->fd, fb->width, fb->height,
+-                                         p->gbm_format,
++                                         fb_format,
+                                          handles, strides, offsets, modifiers,
+                                          &fb->id, flags);
+     if (ret) {
+-        ret = drmModeAddFB2(fb->fd, fb->width, fb->height, p->gbm_format,
++        ret = drmModeAddFB2(fb->fd, fb->width, fb->height, fb_format,
+                             handles, strides, offsets, &fb->id, 0);
+     }
+     if (ret) {

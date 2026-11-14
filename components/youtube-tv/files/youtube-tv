@@ -1,0 +1,338 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Starts VacuumTube, the TV interface of YouTube, and gives the TV the
+# refresh rate and the HDR mode of the video that plays.
+#
+#   youtube-tv [URL]
+#
+# Plasma keeps one output mode for all windows, and VacuumTube cannot
+# change it. So this launcher asks the player of VacuumTube once a second
+# for the frame rate and the color format of the video. It reaches the
+# player through the debugging port of Chromium on localhost, which the
+# component turns on in flags.txt of VacuumTube.
+#
+# YouTube offers the HDR version of a video only to a screen in HDR mode.
+# So HDR is on while VacuumTube runs, and off while an SDR video plays.
+# When VacuumTube ends, the user service htpc-display.service sets the
+# output mode and HDR from the configuration file again.
+import base64
+import json
+import os
+import re
+import socket
+import struct
+import subprocess
+import sys
+import time
+import urllib.request
+
+APP_ID = "rocks.shy.VacuumTube"
+DEBUG_PORT = 47811
+CONFIG = "/etc/x86-linux-htpc/htpc.conf"
+POLL_INTERVAL = 1.0
+# Between two videos, for example with autoplay, the player has no video
+# for a moment. HDR comes back only after this time in the menus, so the TV
+# does not sync twice between two SDR videos.
+MENU_DELAY = 5.0
+# A rate matches a frame rate if it is the same or two times the same, with
+# this difference at most. 23.976 and 24 differ by 0.1 %, so they do not
+# match each other.
+RATE_TOLERANCE = 0.0005
+# The refresh rates of TV modes. YouTube reports 23.976 fps as "24", so the
+# launcher measures the frame rate and picks the nearest of these rates.
+TV_RATES = (24000 / 1001, 24, 25, 30000 / 1001, 30, 50, 60000 / 1001, 60)
+# The launcher waits this long for a measurement. After that, it uses the
+# rounded rate of YouTube.
+MEASURE_TIMEOUT = 15.0
+# The time that the TV and the AV receiver need to sync to a new mode.
+SYNC_WAIT = 3.0
+# The sender of the component network-wake. A cast from the YouTube app of
+# a phone starts a video in VacuumTube, and the packet turns on a TV in
+# standby. Without the component, the file does not exist.
+WAKE = "/usr/local/libexec/x86-linux-htpc/wake-devices"
+
+# During a mode change, the TV shows no picture and the HDMI audio device
+# goes away for a moment. YouTube then pauses, and its automatic quality
+# steps down because of the lost frames. So the launcher pauses the video
+# itself before the change, and starts it again after the sync, at the
+# highest quality of the video.
+PLAYER_JS = """(() => [document.getElementById("movie_player"),
+                      document.querySelector(".html5-video-player")]
+                     .find(e => e && e.getStatsForNerds))()"""
+PAUSE_JS = f"(() => {{ const p = {PLAYER_JS}; if (p) p.pauseVideo(); }})()"
+RESUME_JS = f"""(() => {{
+  const p = {PLAYER_JS};
+  if (!p) return;
+  const best = p.getAvailableQualityLevels().find(q => q !== "auto");
+  if (best) p.setPlaybackQualityRange(best, best);
+  p.playVideo();
+}})()"""
+
+# Reads the video of the YouTube player. The page can have more than one
+# video element, and the one that plays has the largest time.
+#
+# YouTube rounds the frame rate, so the script also measures it from the
+# media time of 120 shown frames. The time stamps of a WebM file have a
+# precision of 1 ms. Over 120 frames, the error is small enough to tell
+# 23.976 from 24 fps. A gap of more than one frame, for example a dropped
+# frame, counts as the number of frames that it spans. A seek starts the
+# measurement again.
+PLAYER_STATE_JS = """(() => {
+  const player = [document.getElementById("movie_player"),
+                  document.querySelector(".html5-video-player")]
+                 .find(e => e && e.getStatsForNerds);
+  const video = [...document.querySelectorAll("video")]
+                .sort((a, b) => b.currentTime - a.currentTime)[0];
+  if (!player || !video || !location.hash.startsWith("#/watch")) return null;
+  let stats;
+  try { stats = player.getStatsForNerds(); } catch (e) { return null; }
+  const rounded = parseFloat((stats.resolution.match(/@([\\d.]+)(?!.*@)/) || [])[1]);
+  if (video.htpcKey !== location.hash && rounded > 0) {
+    video.htpcKey = location.hash;
+    const m = video.htpcMeasure = {first: null, last: null, frames: 0, fps: null};
+    const step = 1 / rounded;
+    const onFrame = (now, meta) => {
+      if (video.htpcMeasure !== m) return;
+      const t = meta.mediaTime;
+      const gap = m.last === null ? 0 : t - m.last;
+      if (m.last === null || gap <= 0 || gap > 0.5) {
+        m.first = t; m.frames = 0;
+      } else {
+        m.frames += Math.round(gap / step);
+      }
+      m.last = t;
+      if (m.frames >= 120) { m.fps = m.frames / (m.last - m.first); return; }
+      video.requestVideoFrameCallback(onFrame);
+    };
+    video.requestVideoFrameCallback(onFrame);
+  }
+  return {resolution: stats.resolution || "", color: stats.color || "",
+          ended: video.ended, started: video.currentTime > 0,
+          measured: video.htpcMeasure ? video.htpcMeasure.fps : null};
+})()"""
+
+
+def config_value(key, default=""):
+    value = default
+    try:
+        with open(CONFIG) as f:
+            for line in f:
+                match = re.match(rf"^\s*{key}=(.*)$", line.rstrip("\n"))
+                if match:
+                    value = match.group(1).strip().strip('"')
+    except OSError:
+        pass
+    return value
+
+
+class DevTools:
+    """Evaluates one JavaScript expression in the page of VacuumTube. A new
+    connection for each call keeps the code simple, and once a second is
+    cheap."""
+
+    def evaluate(self, expression):
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{DEBUG_PORT}/json", timeout=2) as r:
+                targets = json.load(r)
+            page = next(t for t in targets if t.get("type") == "page")
+            path = page["webSocketDebuggerUrl"].split(str(DEBUG_PORT), 1)[1]
+            with socket.create_connection(("127.0.0.1", DEBUG_PORT), timeout=3) as sock:
+                self._handshake(sock, path)
+                self._send(sock, {"id": 1, "method": "Runtime.evaluate",
+                                  "params": {"expression": expression, "returnByValue": True}})
+                while True:
+                    message = self._receive(sock)
+                    if message.get("id") == 1:
+                        return message.get("result", {}).get("result", {}).get("value")
+        except (OSError, ValueError, StopIteration, KeyError):
+            return None
+
+    def _handshake(self, sock, path):
+        key = base64.b64encode(os.urandom(16)).decode()
+        sock.sendall((f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{DEBUG_PORT}\r\n"
+                      "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                      f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+        self._buffer = b""
+        while b"\r\n\r\n" not in self._buffer:
+            data = sock.recv(4096)
+            if not data:
+                raise OSError("DevTools closed the connection")
+            self._buffer += data
+        header, self._buffer = self._buffer.split(b"\r\n\r\n", 1)
+        if b" 101 " not in header.split(b"\r\n", 1)[0]:
+            raise OSError("DevTools refused the connection")
+
+    def _send(self, sock, message):
+        data = json.dumps(message).encode()
+        header = bytearray([0x81])
+        if len(data) < 126:
+            header.append(0x80 | len(data))
+        else:
+            header += bytes([0x80 | 126]) + struct.pack(">H", len(data))
+        mask = os.urandom(4)
+        sock.sendall(bytes(header) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(data)))
+
+    def _read(self, sock, count):
+        while len(self._buffer) < count:
+            data = sock.recv(65536)
+            if not data:
+                raise OSError("DevTools closed the connection")
+            self._buffer += data
+        data, self._buffer = self._buffer[:count], self._buffer[count:]
+        return data
+
+    def _receive(self, sock):
+        _, length = self._read(sock, 2)
+        length &= 0x7F
+        if length == 126:
+            length = struct.unpack(">H", self._read(sock, 2))[0]
+        elif length == 127:
+            length = struct.unpack(">Q", self._read(sock, 8))[0]
+        return json.loads(self._read(sock, length))
+
+
+class Display:
+    """Changes the output mode and HDR through kscreen-doctor."""
+
+    def __init__(self, output):
+        self.output = output
+        self.current = None
+
+    def _outputs(self):
+        result = subprocess.run(["kscreen-doctor", "-j"], capture_output=True, text=True)
+        if result.returncode != 0:
+            return None
+        for output in json.loads(result.stdout).get("outputs", []):
+            if output.get("name") == self.output and output.get("enabled"):
+                return output
+        return None
+
+    def matching_mode(self, output, fps):
+        """The mode with the size of the current mode and the frame rate, or
+        two times the frame rate."""
+        modes = {m["id"]: m for m in output.get("modes", [])}
+        current = modes.get(output.get("currentModeId"))
+        if not current:
+            return None
+        for factor in (1, 2):
+            target = fps * factor
+            for mode in modes.values():
+                if (mode["size"] == current["size"]
+                        and abs(mode["refreshRate"] - target) / target <= RATE_TOLERANCE):
+                    return mode
+        return None
+
+    def changes(self, fps, hdr):
+        """The kscreen-doctor arguments for the rate and HDR. One call with
+        all of them makes the TV sync only once."""
+        if (fps, hdr) == self.current:
+            return []
+        output = self._outputs()
+        if not output:
+            return []
+        args = []
+        mode = self.matching_mode(output, fps) if fps else None
+        if mode and mode["id"] != output.get("currentModeId"):
+            args.append(f"output.{self.output}.mode.{mode['id']}")
+        if output.get("hdr") != hdr:
+            args.append(f"output.{self.output}.hdr.{'enable' if hdr else 'disable'}")
+        return args
+
+    def apply(self, fps, hdr, args=None):
+        args = self.changes(fps, hdr) if args is None else args
+        if args:
+            subprocess.run(["kscreen-doctor", *args], capture_output=True)
+        self.current = (fps, hdr)
+
+    def restore_login_settings(self):
+        subprocess.run(["systemctl", "--user", "restart", "htpc-display.service"],
+                       capture_output=True)
+
+
+def nearest_tv_rate(fps):
+    return min(TV_RATES, key=lambda rate: abs(rate - fps))
+
+
+def video_format(state, waited):
+    """The frame rate and HDR of the video that plays. The player statistics
+    give the rounded rate and the color, for example "3840x2160@24 /
+    3840x2160@24" and "smpte2084 (PQ) / bt2020". Until the measurement is
+    ready, and for at most MEASURE_TIMEOUT seconds, the result is None."""
+    if not state or state.get("ended") or not state.get("started"):
+        return None
+    rates = re.findall(r"@([\d.]+)", state.get("resolution", ""))
+    if not rates:
+        return None
+    fps = state.get("measured")
+    if not fps:
+        if waited < MEASURE_TIMEOUT:
+            return None
+        fps = float(rates[-1])
+    hdr = bool(re.search(r"smpte2084|arib-std-b67|hlg", state.get("color", ""), re.I))
+    return nearest_tv_rate(fps), hdr
+
+
+def vacuumtube_running():
+    result = subprocess.run(["flatpak", "ps", "--columns=application"],
+                            capture_output=True, text=True)
+    return APP_ID in result.stdout.split()
+
+
+def wake_tv():
+    if os.access(WAKE, os.X_OK):
+        # The packets go out in the background, so the poll does not wait.
+        subprocess.Popen([WAKE])
+
+
+def main():
+    args = sys.argv[1:]
+    if vacuumtube_running():
+        # The running VacuumTube opens the link, and its launcher keeps
+        # watching the player.
+        subprocess.run(["flatpak", "run", APP_ID, *args])
+        return
+    display = Display(config_value("HDMI_OUTPUT", "HDMI-A-1"))
+    app = subprocess.Popen(["flatpak", "run", APP_ID, *args])
+    devtools = DevTools()
+    # HDR at the start, so that YouTube offers the HDR version of a video.
+    display.apply(None, True)
+    menu_since = None
+    video_since = None
+    try:
+        while app.poll() is None:
+            state = devtools.evaluate(PLAYER_STATE_JS)
+            if state and state.get("started") and not state.get("ended"):
+                if not video_since:
+                    wake_tv()
+                video_since = video_since or time.monotonic()
+            else:
+                video_since = None
+            playing = video_format(state, time.monotonic() - (video_since or time.monotonic()))
+            if playing:
+                menu_since = None
+                args = display.changes(*playing)
+                if args:
+                    devtools.evaluate(PAUSE_JS)
+                    display.apply(*playing, args)
+                    time.sleep(SYNC_WAIT)
+                    devtools.evaluate(RESUME_JS)
+                else:
+                    display.current = playing
+            elif video_since:
+                # The measurement of a new video runs. The mode stays.
+                menu_since = None
+            elif display.current and display.current[0] is not None:
+                menu_since = menu_since or time.monotonic()
+                if time.monotonic() - menu_since >= MENU_DELAY:
+                    # Back in the menus: keep the rate of the last video, so
+                    # the next video of the same kind needs no new sync, but
+                    # turn HDR on for the choice of the next format.
+                    display.apply(display.current[0], True)
+            time.sleep(POLL_INTERVAL)
+    finally:
+        display.restore_login_settings()
+
+
+if __name__ == "__main__":
+    main()

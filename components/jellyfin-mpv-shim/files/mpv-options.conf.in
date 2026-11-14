@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# The mpv options of x86-linux-htpc for jellyfin-mpv-shim.
+#
+# The component jellyfin-mpv-shim writes this file at each install, from
+# /etc/x86-linux-htpc/htpc.conf. Put your own options into mpv.conf in the
+# same folder. mpv.conf includes this file in its first line, so a later
+# line in mpv.conf can change each value here.
+
+# libplacebo output with Vulkan. target-colorspace-hint tells KWin the HDR
+# format of the video, so KWin switches the TV to HDR10 for HDR videos.
+vo=gpu-next
+gpu-api=vulkan
+target-colorspace-hint=yes
+
+# The peak detection of each frame costs more GPU time than an Intel N100
+# class GPU has for a 4K frame at 24 Hz. The static metadata of the video
+# is enough for the tone mapping.
+hdr-compute-peak=no
+
+hwdec=vaapi
+fullscreen=yes
+
+# scripts/htpc-refresh.lua gives this output the refresh rate of each video.
+script-opts-append=htpc_refresh-output=@OUTPUT@
+
+# The formats that go unchanged to the AV receiver (AUDIO_PASSTHROUGH_FORMATS)
+audio-spdif=@AUDIO_SPDIF@

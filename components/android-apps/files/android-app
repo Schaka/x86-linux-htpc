@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Starts an Android app in the full-screen interface of Waydroid.
+#
+#   android-app PACKAGE
+#
+# The Android TV image shows apps only inside its full-screen interface,
+# not as single windows. The user service waydroid-session.service of the
+# component waydroid runs the Android session. The script waits until
+# Android finished its start, starts the app, and then shows the interface
+# with the app in front.
+set -euo pipefail
+
+package="${1:?Usage: android-app PACKAGE}"
+
+android_ready() {
+	waydroid status 2>/dev/null | grep -q 'Session:.*RUNNING' &&
+		[[ "$(waydroid prop get sys.boot_completed 2>/dev/null | tail -n 1)" == 1 ]]
+}
+
+systemctl --user start waydroid-session.service
+for _ in $(seq 90); do
+	android_ready && break
+	sleep 1
+done
+android_ready || {
+	printf 'ERROR: Android did not start within 90 seconds.\n' >&2
+	exit 1
+}
+
+waydroid app launch "${package}"
+# With a running session, show-full-ui only shows the interface and ends.
+# A show-full-ui at the same time as the start of the app shows no window.
+exec waydroid show-full-ui

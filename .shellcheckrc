@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+source-path=SCRIPTDIR
+external-sources=true
+# The check scripts pass functions by name to `check`, so shellcheck sees
+# no direct call of them.
+disable=SC2329

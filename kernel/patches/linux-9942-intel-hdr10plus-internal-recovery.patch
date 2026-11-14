@@ -1,0 +1,46 @@
+From: lessbones <8473322+lessbones@users.noreply.github.com>
+Subject: [PATCH] drm/i915: include the primary frame in internal modesets
+
+Internal link recovery adds CRTC state before committing. The HDR10+ frame
+contract captures the supplied primary-plane mask before helper expansion,
+so recovery with active HDR10+ metadata fails with -EINVAL even though the
+existing primary framebuffer is valid.
+
+Acquire the existing primary-plane state before commit so the normal
+contract can validate it. Preserve acquisition errors and the existing
+-EDEADLK retry path; do not bypass HDR10+ admission.
+
+Rebased by x86-linux-htpc on Linux 7.3.3. Linux 7.3 moved the loop into
+intel_modeset_commit_pipes_for_atomic_state(), which returns on errors
+instead of jumping to the cleanup label.
+
+Upstream: libreelec-x86-DV a17f0d3a951917bac79e44b64ed41e0f8109cce9
+  projects/Generic/patches/linux/linux-9942-intel-hdr10plus-internal-recovery.patch
+Fits: Linux 7.3
+SPDX-License-Identifier: GPL-2.0-only
+---
+--- a/drivers/gpu/drm/i915/display/intel_display.c
++++ b/drivers/gpu/drm/i915/display/intel_display.c
+@@ -5795,12 +5795,22 @@ int intel_modeset_commit_pipes_for_atomic_state(struct intel_atomic_state *state
+ 	state->internal = true;
+ 
+ 	for_each_intel_crtc_in_pipe_mask(display, crtc, pipe_mask) {
++		struct drm_plane_state *primary_state;
+ 		struct intel_crtc_state *crtc_state =
+ 			intel_atomic_get_crtc_state(&state->base, crtc);
+ 
+ 		if (IS_ERR(crtc_state))
+ 			return PTR_ERR(crtc_state);
+ 
++		/*
++		 * Include the current primary frame before atomic_check snapshots the
++		 * HDR10+ frame mask. Adding it during helper expansion is too late.
++		 */
++		primary_state = drm_atomic_get_plane_state(&state->base,
++							   crtc->base.primary);
++		if (IS_ERR(primary_state))
++			return PTR_ERR(primary_state);
++
+ 		crtc_state->uapi.connectors_changed = true;
+ 	}
+ 

@@ -1,0 +1,379 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# An mpv script for the CB1 mpv with its DRM output on its own VT. mpv
+# starts each executable "*.run" file in its scripts folder and gives it an
+# IPC connection (--mpv-ipc-fd).
+#
+# On its own VT, mpv has no window system. The DRM output switches to the
+# VT of mpv when it starts (--drm-vt). This script does the other two jobs:
+#
+# 1. When mpv no longer needs the screen, or when mpv ends, it switches
+#    back to the VT that was in front before, for example the VT of Plasma.
+# 2. While the VT of mpv is in front, it reads the keys of the keyboards
+#    and remotes, and gives them to mpv. The HTPC user must be in the group
+#    "input" for this.
+# 3. It also gives mpv the movement and the clicks of a mouse or an air
+#    mouse, and draws a pointer on the OSD. On its own VT, mpv draws no
+#    pointer.
+import json
+import os
+import select
+import socket
+import struct
+import subprocess
+import sys
+import syslog
+import time
+
+# mpv sets the playback state in steps. A short wait keeps the VT in front
+# between two files and during a restart of the video output.
+RELEASE_DELAY = 1.0
+# mpv holds the DRM master until its process ends. Plasma gets the master
+# back only after that.
+EXIT_WAIT = 5.0
+DEVICE_SCAN_INTERVAL = 2.0
+
+EVENT_FORMAT = "llHHi"
+EVENT_SIZE = struct.calcsize(EVENT_FORMAT)
+EV_KEY = 1
+EV_REL = 2
+REL_X, REL_Y = 0, 1
+BTN_LEFT = 272
+KEY_RELEASE, KEY_PRESS = 0, 1
+# An air mouse moves by a few counts for each step. On a 4K OSD, one count
+# for each pixel makes a slow pointer.
+POINTER_SPEED = 2.0
+POINTER_HIDE_DELAY = 5.0
+POINTER_OVERLAY_ID = 63
+# The arrow of the pointer as an ASS drawing, for a 1080 pixel high OSD
+POINTER_SHAPE = "m 0 0 l 0 34 l 9 26 l 15 39 l 21 36 l 15 24 l 26 24"
+
+# Linux key codes to mpv key names. The names of the remote keys match the
+# bindings of jellyfin-mpv-shim: ESC goes back, MENU opens the menu, and
+# CLOSE_WIN hides the window of the shim, so the Home key of a remote goes
+# back to Plasma.
+KEYS = {
+    1: "ESC", 14: "BS", 15: "TAB", 28: "ENTER", 57: "SPACE",
+    96: "KP_ENTER", 102: "HOME", 103: "UP", 104: "PGUP", 105: "LEFT",
+    106: "RIGHT", 107: "END", 108: "DOWN", 109: "PGDWN", 110: "INS",
+    111: "DEL", 113: "MUTE", 114: "VOLUME_DOWN", 115: "VOLUME_UP",
+    119: "PAUSE", 127: "MENU", 128: "STOP", 139: "MENU", 158: "ESC",
+    163: "NEXT", 164: "PLAYPAUSE", 165: "PREV", 166: "STOP",
+    168: "REWIND", 200: "PLAY", 201: "PAUSE", 207: "PLAY",
+    172: "CLOSE_WIN", 174: "CLOSE_WIN", 208: "FORWARD", 352: "ENTER",
+    353: "ENTER",
+}
+KEYS.update({59 + i: f"F{i + 1}" for i in range(10)})
+KEYS.update({87: "F11", 88: "F12"})
+KEYS.update({2 + i: str((i + 1) % 10) for i in range(10)})
+for first_code, letters in ((16, "qwertyuiop"), (30, "asdfghjkl"), (44, "zxcvbnm")):
+    KEYS.update({first_code + i: letter for i, letter in enumerate(letters)})
+KEY_BACK = 158
+# The shim uses ESC only in its menus and its browser. During playback, ESC
+# only leaves fullscreen, and "q" stops. So the Back key of a remote stops a
+# video that plays, and goes back in the browser otherwise.
+STOP_KEY = "q"
+SHIFT_KEYS = {42, 54}
+CTRL_KEYS = {29, 97}
+ALT_KEYS = {56, 100}
+# A device with one of these keys is a keyboard, a remote or a mouse.
+DEVICE_KEYS = (28, 103, 164, 352, BTN_LEFT)
+
+
+def active_vt():
+    try:
+        with open("/sys/class/tty/tty0/active") as f:
+            return int(f.read().strip().removeprefix("tty"))
+    except (OSError, ValueError):
+        return 0
+
+
+def plasma_vt():
+    """The VT of the graphical session of this user. The DRM output of mpv
+    can switch the VT before this script reads the VT that was in front,
+    for example when mpv starts with a window."""
+    def logind(*args):
+        result = subprocess.run(["loginctl", *args, "--value"], capture_output=True, text=True)
+        return result.stdout.strip()
+    session = logind("show-user", str(os.getuid()), "-p", "Display")
+    vt = logind("show-session", session, "-p", "VTNr") if session else ""
+    return int(vt) if vt.isdigit() else 0
+
+
+def show_bigscreen_home():
+    """Plasma Bigscreen shows a launch screen after a tile starts an app, until
+    a window of the app is active. mpv draws on its own VT and never opens a
+    Plasma window, so the launch screen would stay. The home screen closes
+    it. Without Bigscreen, the call fails and changes nothing."""
+    subprocess.run(
+        ["busctl", "--user", "call", "org.kde.kglobalaccel", "/component/plasmashell",
+         "org.kde.kglobalaccel.Component", "invokeShortcut", "s", "Toggle Bigscreen Home Screen"],
+        capture_output=True, timeout=10)
+
+
+def has_device_keys(event_name):
+    """Reads the key bitmap of an input device from sysfs. The file lists
+    the bitmap in words of 64 bits, the highest word first."""
+    path = f"/sys/class/input/{event_name}/device/capabilities/key"
+    try:
+        with open(path) as f:
+            words = f.read().split()
+    except OSError:
+        return False
+    bits = 0
+    for word in words:
+        bits = (bits << 64) | int(word, 16)
+    return any(bits >> code & 1 for code in DEVICE_KEYS)
+
+
+class Screen:
+    def __init__(self, ipc_fd):
+        self.ipc = socket.socket(fileno=ipc_fd)
+        self.buffer = b""
+        self.vt = 0
+        self.mpv_pid = None
+        self.previous_vt = 0
+        self.state = {"idle-active": True, "force-window": False, "vo-configured": False}
+        # The core of mpv does not answer while its output starts. Until mpv
+        # sent each value once, the state above is a guess.
+        self.known = set()
+        self.release_at = None
+        self.devices = {}
+        self.skipped = set()
+        self.next_scan = 0.0
+        self.modifiers = set()
+        self.osd_size = (3840, 2160)
+        self.pointer = None
+        self.pointer_hide_at = None
+
+    def send(self, *command, request_id=0):
+        message = {"command": list(command), "request_id": request_id}
+        self.ipc.sendall(json.dumps(message).encode() + b"\n")
+
+    def send_named(self, command):
+        self.ipc.sendall(json.dumps({"command": command}).encode() + b"\n")
+
+    def log(self, text):
+        # mpv runs this script as a separate process, and its output reaches
+        # no log. The journal keeps the decisions for a later look.
+        syslog.syslog(syslog.LOG_INFO, text)
+        try:
+            self.send("print-text", f"[htpc-screen] {text}")
+        except OSError:
+            # After the end of mpv, nobody reads the log.
+            pass
+
+    def switch_to(self, vt):
+        # logind allows the switch to the user of a local session.
+        result = subprocess.run(
+            ["busctl", "call", "org.freedesktop.login1", "/org/freedesktop/login1/seat/seat0",
+             "org.freedesktop.login1.Seat", "SwitchTo", "u", str(vt)],
+            capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            self.log(f"Cannot switch to VT {vt}: {result.stderr.strip()}")
+        else:
+            self.log(f"Switched to VT {vt}")
+
+    def needs_screen(self):
+        return (self.state["force-window"] or not self.state["idle-active"]
+                or self.state["vo-configured"])
+
+    def remember_previous_vt(self):
+        current = active_vt()
+        if current and current != self.vt:
+            self.previous_vt = current
+
+    def update(self):
+        if self.needs_screen() or len(self.known) < len(self.state):
+            self.release_at = None
+        elif self.release_at is None:
+            self.release_at = time.monotonic() + RELEASE_DELAY
+
+    def release(self):
+        self.release_at = None
+        previous = self.previous_vt or plasma_vt()
+        self.log(f"Release: previous VT {previous}, active VT {active_vt()}, own VT {self.vt}")
+        if previous and active_vt() == self.vt:
+            self.switch_to(previous)
+            show_bigscreen_home()
+
+    def handle_message(self, message):
+        if message.get("event") == "property-change" and message.get("name") in self.state:
+            # force-window can also be "immediate".
+            self.state[message["name"]] = message.get("data") not in (None, False, "no")
+            self.known.add(message["name"])
+            self.update()
+            self.log(f"State {self.state}, release in "
+                     f"{'-' if self.release_at is None else round(self.release_at - time.monotonic(), 1)} s")
+        elif message.get("request_id") == 1 and "data" in message:
+            self.mpv_pid = message["data"]
+        elif message.get("request_id") == 2 and isinstance(message.get("data"), int):
+            self.vt = message["data"]
+        elif message.get("event") == "property-change" and message.get("name") == "osd-dimensions":
+            data = message.get("data") or {}
+            if data.get("w") and data.get("h"):
+                self.osd_size = (data["w"], data["h"])
+
+    def read_ipc(self):
+        data = self.ipc.recv(65536)
+        if not data:
+            return False
+        self.buffer += data
+        while b"\n" in self.buffer:
+            line, self.buffer = self.buffer.split(b"\n", 1)
+            try:
+                self.handle_message(json.loads(line))
+            except ValueError:
+                pass
+        return True
+
+    def scan_devices(self):
+        self.next_scan = time.monotonic() + DEVICE_SCAN_INTERVAL
+        try:
+            names = os.listdir("/dev/input")
+        except OSError:
+            return
+        for name in names:
+            if not name.startswith("event") or name in self.devices or name in self.skipped:
+                continue
+            if not has_device_keys(name):
+                self.skipped.add(name)
+                continue
+            try:
+                self.devices[name] = os.open(f"/dev/input/{name}", os.O_RDONLY | os.O_NONBLOCK)
+            except PermissionError:
+                self.skipped.add(name)
+                self.log(f"No access to /dev/input/{name}. Add the user to the group input.")
+            except OSError:
+                pass
+
+    def key_name(self, code):
+        if code == KEY_BACK and not self.state["idle-active"]:
+            return STOP_KEY
+        name = KEYS.get(code)
+        if name is None:
+            return None
+        if len(name) == 1 and name.isalpha() and self.modifiers & SHIFT_KEYS:
+            name = name.upper()
+        if self.modifiers & ALT_KEYS:
+            name = "Alt+" + name
+        if self.modifiers & CTRL_KEYS:
+            name = "Ctrl+" + name
+        return name
+
+    def move_pointer(self, dx, dy):
+        width, height = self.osd_size
+        x, y = self.pointer or (width // 2, height // 2)
+        x = min(max(0, x + dx * POINTER_SPEED), width - 1)
+        y = min(max(0, y + dy * POINTER_SPEED), height - 1)
+        self.pointer = (x, y)
+        self.send("mouse", int(x), int(y))
+        self.draw_pointer()
+
+    def draw_pointer(self):
+        width, height = self.osd_size
+        scale = int(100 * height / 1080)
+        x, y = self.pointer
+        data = (f"{{\\an7\\pos({int(x)},{int(y)})\\bord2\\shad0\\1c&HFFFFFF&\\3c&H000000&"
+                f"\\fscx{scale}\\fscy{scale}\\p1}}{POINTER_SHAPE}{{\\p0}}")
+        self.send_named({"name": "osd-overlay", "id": POINTER_OVERLAY_ID, "format": "ass-events",
+                         "data": data, "res_x": width, "res_y": height, "z": 1000})
+        self.pointer_hide_at = time.monotonic() + POINTER_HIDE_DELAY
+
+    def hide_pointer(self):
+        self.pointer_hide_at = None
+        self.send_named({"name": "osd-overlay", "id": POINTER_OVERLAY_ID, "format": "none", "data": ""})
+
+    def click(self, pressed):
+        """A press and a release of the left button at the pointer. The
+        scripts of the shim bind MBTN_LEFT and react to its press and its
+        release."""
+        if self.pointer:
+            self.send("mouse", int(self.pointer[0]), int(self.pointer[1]))
+            self.draw_pointer()
+        self.send("keydown" if pressed else "keyup", "MBTN_LEFT")
+
+    def read_device(self, name, fd):
+        try:
+            data = os.read(fd, EVENT_SIZE * 64)
+        except BlockingIOError:
+            return
+        except OSError:
+            # The device is gone, for example a remote receiver that was
+            # pulled out.
+            os.close(fd)
+            del self.devices[name]
+            return
+        in_front = active_vt() == self.vt
+        dx = dy = 0
+        for offset in range(0, len(data) - EVENT_SIZE + 1, EVENT_SIZE):
+            _, _, kind, code, value = struct.unpack_from(EVENT_FORMAT, data, offset)
+            if kind == EV_REL and code in (REL_X, REL_Y):
+                dx += value if code == REL_X else 0
+                dy += value if code == REL_Y else 0
+                continue
+            if kind != EV_KEY or value not in (KEY_PRESS, KEY_RELEASE):
+                continue
+            if code == BTN_LEFT:
+                if in_front:
+                    self.click(value == KEY_PRESS)
+                continue
+            if code in SHIFT_KEYS | CTRL_KEYS | ALT_KEYS:
+                (self.modifiers.add if value == KEY_PRESS else self.modifiers.discard)(code)
+                continue
+            # Plasma reads the keys while its VT is in front.
+            if not in_front:
+                continue
+            name = self.key_name(code)
+            if name:
+                # mpv repeats a held key by itself between keydown and keyup.
+                self.send("keydown" if value == KEY_PRESS else "keyup", name)
+        if in_front and (dx or dy):
+            self.move_pointer(dx, dy)
+
+    def wait_for_mpv_exit(self):
+        deadline = time.monotonic() + EXIT_WAIT
+        while self.mpv_pid and os.path.exists(f"/proc/{self.mpv_pid}") and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+    def run(self):
+        self.send("get_property", "pid", request_id=1)
+        self.send("get_property", "drm-vt", request_id=2)
+        for number, name in enumerate(self.state, start=1):
+            self.send("observe_property", number, name)
+        self.send("observe_property", 10, "osd-dimensions")
+        while True:
+            self.remember_previous_vt()
+            if time.monotonic() >= self.next_scan:
+                self.scan_devices()
+            timeout = 0.5
+            for deadline in (self.release_at, self.pointer_hide_at):
+                if deadline is not None:
+                    timeout = max(0.0, min(timeout, deadline - time.monotonic()))
+            fds = [self.ipc.fileno(), *self.devices.values()]
+            ready, _, _ = select.select(fds, [], [], timeout)
+            if self.ipc.fileno() in ready and not self.read_ipc():
+                break
+            for name, fd in list(self.devices.items()):
+                if fd in ready:
+                    self.read_device(name, fd)
+            if self.release_at is not None and time.monotonic() >= self.release_at:
+                self.release()
+            if self.pointer_hide_at is not None and time.monotonic() >= self.pointer_hide_at:
+                self.hide_pointer()
+        # mpv ended, also after a crash. Plasma gets the screen back.
+        self.wait_for_mpv_exit()
+        self.release()
+
+
+def main():
+    fd_option = next((arg for arg in sys.argv[1:] if arg.startswith("--mpv-ipc-fd=")), None)
+    if fd_option is None:
+        sys.exit("htpc-screen.run runs only as an mpv script.")
+    Screen(int(fd_option.split("=", 1)[1].split(":")[0])).run()
+
+
+if __name__ == "__main__":
+    syslog.openlog("htpc-screen")
+    main()

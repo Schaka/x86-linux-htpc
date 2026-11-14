@@ -1,0 +1,2 @@
+# VacuumTube comes from Flathub.
+flatpak

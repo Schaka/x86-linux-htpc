@@ -1,0 +1,5 @@
+# The container runtime of Android
+waydroid
+# checkmodule and semodule_package, for the SELinux module of the component
+checkpolicy
+policycoreutils

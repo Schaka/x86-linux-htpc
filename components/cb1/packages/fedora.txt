@@ -1,0 +1,16 @@
+# The libraries of the CB1 build in /opt/x86-linux-htpc/cb1. The build in
+# cb1/build-in-container.sh links them from the distribution.
+alsa-lib
+lcms2
+libass
+libdav1d
+libdisplay-info
+libdrm
+libjpeg-turbo
+libva
+libxkbcommon
+luajit
+mesa-libgbm
+pipewire-libs
+uchardet
+zimg

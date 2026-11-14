@@ -1,0 +1,11 @@
+# Build output of the kernel, Kodi, CB1 and mpv builds
+/build/
+*.rpm
+
+# Logs of test runs contain addresses and device names
+*.log
+# Worktrees of agents
+.claude/worktrees/
+
+# Python byte code
+__pycache__/

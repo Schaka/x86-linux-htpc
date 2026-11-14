@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- The Home key of a remote goes back to the home screen of Plasma, as in
+     the other players of the HTPC. So in Kodi, it ends Kodi. -->
+<keymap>
+  <global>
+    <keyboard>
+      <browser_home>Quit</browser_home>
+      <homepage>Quit</homepage>
+    </keyboard>
+  </global>
+</keymap>

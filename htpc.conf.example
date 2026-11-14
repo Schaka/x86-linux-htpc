@@ -1,0 +1,116 @@
+# Configuration of one HTPC machine.
+#
+# Copy this file to /etc/x86-linux-htpc/htpc.conf and change the values.
+# Each line is KEY=value. The scripts read the file as data, not as a
+# script, so do not use shell commands or variables in it.
+
+# The components that "./install.sh" installs without names, separated by
+# spaces. setup.sh writes this list from the answers. Empty: all components
+# of components/order.txt.
+COMPONENTS=
+
+# The user that logs in to the TV session. The user must exist.
+HTPC_USER=htpc
+
+# The name of the HDMI output, as `kscreen-doctor --outputs` shows it.
+HDMI_OUTPUT=HDMI-A-1
+
+# The output mode at login: WIDTHxHEIGHT@RATE.
+DISPLAY_MODE=3840x2160@60
+
+# HDR for the Plasma desktop at login: yes or no. Plasma keeps the output in
+# one mode for all windows, and SDR windows look pale in HDR mode. The CB1
+# mpv of jellyfin-mpv-shim switches between SDR, HDR10 and Dolby Vision for
+# each video by itself, and the Android apps of Waydroid get only SDR video.
+# So "no" fits most setups.
+DISPLAY_HDR=no
+
+# Actions in the corners and at the edges of the screen: on or off. The
+# pointer of an air mouse often reaches a corner by accident, and KWin then
+# opens its overview, which a remote cannot close. off removes the actions.
+SCREEN_EDGES=off
+
+# Give the display the refresh rate of each video in jellyfin-mpv-shim: yes
+# or no. The size of the mode stays.
+DISPLAY_MATCH_RATE=yes
+
+# The HDMI audio driver: hda or default. Use hda on machines with SOF audio
+# (many laptops and Chromebooks): SOF with IPC3 passes no compressed audio on
+# HDMI. See docs/audio.md.
+AUDIO_DRIVER=default
+
+# Keep the HDMI audio device open (yes or no), so that the receiver does not
+# cut off the first second of a sound.
+AUDIO_KEEP_HDMI_OPEN=yes
+
+# The audio formats that the AV receiver decodes, separated by spaces.
+# Possible values: ac3 eac3 truehd dts dts-hd. The players decode all
+# other formats to PCM.
+AUDIO_PASSTHROUGH_FORMATS="ac3 eac3 truehd dts dts-hd"
+
+# The MAC addresses that get a Wake-on-LAN packet at login and at the start
+# of each video, separated by spaces, for example the cable and the Wi-Fi
+# address of the TV. Turn on the network wake setting of the TV.
+WAKE_ON_LAN_MACS=
+
+# The apps on the home screen of Plasma Bigscreen, as desktop file names
+# separated by spaces. The home screen then shows only these apps, in its
+# Favorites row. Empty: the home screen keeps its own rows with all apps.
+# The launcher entry of jellyfin-mpv-shim is
+# com.github.iwalton3.jellyfin-mpv-shim.desktop, the one of the component
+# youtube-tv is htpc-youtube-tv.desktop. The component android-apps names
+# the entry of an Android app htpc-android-NAME.desktop.
+HOME_SCREEN_APPS=
+
+# The Android image of Waydroid, as the OTA channels of its system and
+# vendor parts. The default is the Android TV 16 image of WayDroid-ATV.
+WAYDROID_SYSTEM_OTA=https://waydroid-atv.github.io/ota/a16-tv/system
+WAYDROID_VENDOR_OTA=https://waydroid-atv.github.io/ota/a16-tv/vendor
+
+# The Android apps to install, by the names in
+# components/android-apps/files/apps.conf, separated by spaces. An app
+# that the component installed earlier and that the list no longer names is
+# removed.
+ANDROID_APPS="smarttube s0undtv"
+
+# The proxy server of S0undTV for Twitch streams. Twitch puts its ads into
+# the stream, and a proxy in a country without Twitch ads removes them.
+# S0undTV replaces ${channel} with the name of the channel. The list of
+# public proxies is in the README of the project streamlink-ttvlol. Empty:
+# the component does not change the proxy setting of S0undTV.
+TWITCH_PROXY_URL="https://eu.luminous.dev/live/${channel}?allow_source=true&allow_audio_only=true&fast_bread=true"
+
+# The USB IDs of air mouse remotes that send OK and Back as mouse clicks,
+# as VENDOR:PRODUCT separated by spaces. "lsusb" shows the ID of the USB
+# receiver. The component remote-keys turns the clicks into Enter and Back.
+AIR_MOUSE_USB_IDS=
+
+# HDMI-CEC events: yes or no for each.
+CEC_POWER_ON_AT_START=yes
+CEC_ACTIVE_SOURCE_AT_PLAYBACK=yes
+CEC_STANDBY_AT_POWER_OFF=yes
+
+# The address of the Jellyfin server, for example https://jellyfin.example.org.
+# The check of the component jellyfin-mpv-shim shows the login command with it.
+JELLYFIN_SERVER_URL=
+
+# The name of the HTPC in the device list of Jellyfin. Empty: the host name.
+JELLYFIN_PLAYER_NAME=
+
+# The mpv of jellyfin-mpv-shim: system or cb1. system plays in Plasma with
+# the mpv of the distribution. cb1 plays all videos with the CB1 mpv on its
+# own VT, with TV-led Dolby Vision. cb1 needs the components cb1 and
+# kernel-dv. See docs/players.md.
+JELLYFIN_MPV=system
+
+# The folder with the archives of cb1/build-in-container.sh, for the
+# components cb1 and kodi-dv: x86-linux-htpc-cb1-fcN.tar.gz and
+# x86-linux-htpc-kodi-fcN.tar.gz for the Fedora release N of the HTPC.
+CB1_BUILD_DIR=/var/tmp/htpc-cb1
+
+# The VT of Kodi. The CB1 mpv of jellyfin-mpv-shim uses VT 8.
+KODI_VT=9
+
+# The folder with the kernel packages of kernel/build-fedora.sh, for the
+# component kernel-dv. The file names contain ".htpc.".
+KERNEL_PACKAGES_DIR=/var/tmp/htpc-kernel

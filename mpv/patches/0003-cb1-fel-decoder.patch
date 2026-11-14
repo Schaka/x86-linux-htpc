@@ -1,0 +1,510 @@
+Decoder for the enhancement layer of Dolby Vision profile 7.
+
+Adds --vd-lavc-dovi-fel. With VA-API, a second decoder of CB1 decodes the
+enhancement layer units inside the packets of the base layer. Each base
+layer picture waits until its enhancement layer picture of the same
+timestamp is decoded, and then carries it in mp_image.dovi_el. The
+Matroska demuxer passes the hvcE configuration of the enhancement layer
+to the decoder.
+
+License: the license of mpv (GPL-2.0-or-later for the new files).
+diff --git a/demux/demux_mkv.c b/demux/demux_mkv.c
+index 501d20e..dc101bc 100644
+--- a/demux/demux_mkv.c
++++ b/demux/demux_mkv.c
+@@ -30,6 +30,7 @@
+ 
+ #include <libavutil/common.h>
+ #include <libavutil/dovi_meta.h>
++#include <libavutil/mem.h>
+ #include <libavutil/lzo.h>
+ #include <libavutil/intreadwrite.h>
+ #include <libavutil/avstring.h>
+@@ -161,6 +162,8 @@ typedef struct mkv_track {
+     size_t last_index_entry;
+ 
+     AVDOVIDecoderConfigurationRecord *dovi_config;
++    // The HEVC decoder configuration of a Dolby Vision enhancement layer
++    bstr dovi_el_config;
+ } mkv_track_t;
+ 
+ typedef struct mkv_index {
+@@ -836,9 +839,15 @@ static void parse_block_addition_mapping(struct demuxer *demuxer,
+         case MATROSKA_BLOCK_ADD_ID_TYPE_ITU_T_T35:
+         break;
+         case MKBETAG('a','v','c','E'):
+-        case MKBETAG('h','v','c','E'):
+             MP_WARN(demuxer, "Dolby Vision enhancement-layer playback is not supported.\n");
+         break;
++        case MKBETAG('h','v','c','E'):
++            // Only the CB1 decoder of the enhancement layer reads it.
++            if (block_addition_mapping->n_block_add_id_extra_data) {
++                track->dovi_el_config = bstrdup(track,
++                    block_addition_mapping->block_add_id_extra_data);
++            }
++        break;
+         case MKBETAG('d','v','c','C'):
+         case MKBETAG('d','v','v','C'):
+             if (block_addition_mapping->n_block_add_id_extra_data) {
+@@ -1785,6 +1794,18 @@ static int demux_mkv_open_video(demuxer_t *demuxer, mkv_track_t *track)
+             av_free(dovi);
+         }
+ 
++        bstr el = track->dovi_el_config;
++        void *el_data = el.len ? av_memdup(el.start, el.len) : NULL;
++        if (el_data &&
++            !av_packet_side_data_add(&sh_v->lav_codecpar->coded_side_data,
++                                     &sh_v->lav_codecpar->nb_coded_side_data,
++                                     AV_PKT_DATA_HEVC_CONF, el_data, el.len, 0))
++        {
++            MP_WARN(demuxer, "Failed to attach the Dolby Vision enhancement "
++                    "layer configuration for track %d.\n", track->tnum);
++            av_free(el_data);
++        }
++
+         sh_v->dovi = true;
+         sh_v->dv_level = track->dovi_config->dv_level;
+         sh_v->dv_profile = track->dovi_config->dv_profile;
+diff --git a/meson.build b/meson.build
+index f15893e..7320633 100644
+--- a/meson.build
++++ b/meson.build
+@@ -1253,7 +1253,7 @@ cb1 = dependency('cb1', required: get_option('cb1').require(
+ features += {'cb1': cb1.found()}
+ if features['cb1']
+     dependencies += cb1
+-    sources += files('video/out/gpu_next/cb1.c')
++    sources += files('video/decode/cb1_fel.c', 'video/out/gpu_next/cb1.c')
+ endif
+ 
+ egl_wayland_opt = get_option('egl-wayland').require(
+diff --git a/video/decode/cb1_fel.c b/video/decode/cb1_fel.c
+new file mode 100644
+index 0000000..e21e281
+--- /dev/null
++++ b/video/decode/cb1_fel.c
+@@ -0,0 +1,186 @@
++/*
++ * This file is part of mpv.
++ *
++ * mpv is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * mpv is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with mpv.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <libavutil/buffer.h>
++#include <libavutil/dovi_meta.h>
++#include <libavutil/hwcontext.h>
++
++#include <dvbridge_fel.h>
++
++#include "cb1_fel.h"
++#include "common/msg.h"
++#include "demux/stheader.h"
++#include "mpv_talloc.h"
++#include "video/mp_image.h"
++
++struct pending {
++    struct mp_image *mpi;
++    int64_t pts;
++};
++
++struct mp_cb1_fel {
++    struct mp_log *log;
++    struct dvbridge_fel *fel;
++    struct pending *queue;
++    int num_queue;
++    // The EL failed. The base layer plays alone until the next reset.
++    bool failed;
++    bool paired;
++};
++
++static void fail(struct mp_cb1_fel *fel, const char *reason)
++{
++    if (!fel->failed) {
++        MP_ERR(fel, "Dolby Vision FEL: %s. The video plays without its "
++               "enhancement layer.\n", reason);
++    }
++    fel->failed = true;
++}
++
++static void free_frame(void *opaque, uint8_t *data)
++{
++    AVFrame *frame = (AVFrame *)data;
++    av_frame_free(&frame);
++}
++
++struct mp_cb1_fel *mp_cb1_fel_create(struct mp_log *log,
++                                     const struct mp_codec_params *codec,
++                                     AVCodecContext *avctx)
++{
++    const AVCodecParameters *par = codec->lav_codecpar;
++    if (!codec->dovi || codec->dv_profile != 7 || !par)
++        return NULL;
++    const AVPacketSideData *sd = av_packet_side_data_get(par->coded_side_data,
++                                                         par->nb_coded_side_data,
++                                                         AV_PKT_DATA_DOVI_CONF);
++    if (!sd || sd->size < sizeof(AVDOVIDecoderConfigurationRecord) ||
++        !((const AVDOVIDecoderConfigurationRecord *)sd->data)->el_present_flag)
++        return NULL;
++    // Without its own configuration, the EL decoder starts with that of the
++    // base layer, and needs the parameter sets inside the EL units.
++    if (!av_packet_side_data_get(par->coded_side_data, par->nb_coded_side_data,
++                                 AV_PKT_DATA_HEVC_CONF))
++        mp_verbose(log, "The stream has no configuration for its enhancement layer.\n");
++
++    struct dvbridge_fel *dvfel = dvbridge_fel_create(par, avctx->pkt_timebase);
++    if (!dvfel) {
++        mp_err(log, "Dolby Vision FEL: the enhancement layer decoder failed to start.\n");
++        return NULL;
++    }
++    struct mp_cb1_fel *fel = talloc_zero(NULL, struct mp_cb1_fel);
++    fel->log = log;
++    fel->fel = dvfel;
++    mp_verbose(log, "Dolby Vision profile 7: decoding the enhancement layer.\n");
++    return fel;
++}
++
++static void clear_queue(struct mp_cb1_fel *fel)
++{
++    for (int n = 0; n < fel->num_queue; n++)
++        talloc_free(fel->queue[n].mpi);
++    fel->num_queue = 0;
++}
++
++void mp_cb1_fel_destroy(struct mp_cb1_fel **felp)
++{
++    struct mp_cb1_fel *fel = *felp;
++    if (!fel)
++        return;
++    clear_queue(fel);
++    dvbridge_fel_destroy(fel->fel);
++    talloc_free(fel);
++    *felp = NULL;
++}
++
++void mp_cb1_fel_reset(struct mp_cb1_fel *fel)
++{
++    if (!fel)
++        return;
++    clear_queue(fel);
++    dvbridge_fel_reset(fel->fel);
++    fel->failed = false;
++}
++
++// The EL decoder uses the VA-API device of the base layer decoder. That
++// decoder gets its device only with its first hardware frames.
++static void bind_device(struct mp_cb1_fel *fel, AVCodecContext *avctx)
++{
++    if (fel->failed || !avctx->hw_frames_ctx)
++        return;
++    AVHWFramesContext *frames = (AVHWFramesContext *)avctx->hw_frames_ctx->data;
++    if (!dvbridge_fel_device(fel->fel, frames->device_ref))
++        fail(fel, "the enhancement layer needs VA-API");
++}
++
++void mp_cb1_fel_send(struct mp_cb1_fel *fel, AVCodecContext *avctx,
++                     const AVPacket *pkt)
++{
++    if (!fel)
++        return;
++    bind_device(fel, avctx);
++    if (fel->failed)
++        return;
++    bool ok = pkt ? dvbridge_fel_submit(fel->fel, pkt) : dvbridge_fel_drain(fel->fel);
++    if (!ok)
++        fail(fel, "the enhancement layer cannot be decoded");
++}
++
++void mp_cb1_fel_push(struct mp_cb1_fel *fel, AVCodecContext *avctx,
++                     struct mp_image *mpi, int64_t pts)
++{
++    bind_device(fel, avctx);
++    if (pts == AV_NOPTS_VALUE)
++        fail(fel, "a base layer picture has no timestamp");
++    if (fel->num_queue >= MP_CB1_FEL_PENDING)
++        fail(fel, "too many pictures wait for their enhancement layer");
++    MP_TARRAY_APPEND(fel, fel->queue, fel->num_queue,
++                     (struct pending){.mpi = mpi, .pts = pts});
++}
++
++struct mp_image *mp_cb1_fel_pop(struct mp_cb1_fel *fel, bool eof)
++{
++    while (fel->num_queue) {
++        struct pending p = fel->queue[0];
++        AVFrame *el = NULL;
++        int res = fel->failed ? -1 : dvbridge_fel_take(fel->fel, p.pts, &el);
++        if (res == 0 && !eof)
++            return NULL;
++        MP_TARRAY_REMOVE_AT(fel->queue, fel->num_queue, 0);
++        if (res == 1) {
++            p.mpi->dovi_el = av_buffer_create((uint8_t *)el, sizeof(*el),
++                                              free_frame, NULL, 0);
++            if (!p.mpi->dovi_el) {
++                av_frame_free(&el);
++                fail(fel, "out of memory");
++            } else if (!fel->paired) {
++                MP_VERBOSE(fel, "Dolby Vision FEL: the first enhancement layer "
++                           "picture is paired.\n");
++                fel->paired = true;
++            }
++            return p.mpi;
++        }
++        if (res < 0 && !fel->failed)
++            fail(fel, "an enhancement layer picture is missing");
++        if (fel->failed)
++            return p.mpi;
++        // A picture before the first EL picture after a seek, or a picture
++        // at the end without its EL picture: CB1 shows no picture without
++        // its EL, so this one is dropped.
++        talloc_free(p.mpi);
++    }
++    return NULL;
++}
+diff --git a/video/decode/cb1_fel.h b/video/decode/cb1_fel.h
+new file mode 100644
+index 0000000..874dc3e
+--- /dev/null
++++ b/video/decode/cb1_fel.h
+@@ -0,0 +1,62 @@
++/*
++ * This file is part of mpv.
++ *
++ * mpv is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * mpv is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with mpv.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#pragma once
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#include <libavcodec/avcodec.h>
++
++struct mp_cb1_fel;
++struct mp_codec_params;
++struct mp_image;
++struct mp_log;
++
++// The number of base layer pictures that wait for their enhancement layer
++// picture. The hardware decoder needs this many extra surfaces.
++#define MP_CB1_FEL_PENDING 16
++
++// The second decoder for the enhancement layer (EL) of a Dolby Vision
++// profile 7 stream. The EL units travel inside the packets of the base
++// layer. CB1 splits them, decodes them with VA-API, and pairs each EL
++// picture with the base layer picture of the same timestamp. Each paired
++// base layer image carries its EL picture in mp_image.dovi_el.
++//
++// Returns NULL if the stream has no enhancement layer.
++struct mp_cb1_fel *mp_cb1_fel_create(struct mp_log *log,
++                                     const struct mp_codec_params *codec,
++                                     AVCodecContext *avctx);
++void mp_cb1_fel_destroy(struct mp_cb1_fel **fel);
++
++// Call when the base layer decoder is flushed, for example after a seek.
++void mp_cb1_fel_reset(struct mp_cb1_fel *fel);
++
++// Call after the base layer decoder accepted pkt. NULL marks the end of the
++// stream.
++void mp_cb1_fel_send(struct mp_cb1_fel *fel, AVCodecContext *avctx,
++                     const AVPacket *pkt);
++
++// Takes a decoded base layer picture. pts is the timestamp of the frame in
++// the time base of the decoder.
++void mp_cb1_fel_push(struct mp_cb1_fel *fel, AVCodecContext *avctx,
++                     struct mp_image *mpi, int64_t pts);
++
++// Returns the next base layer picture with its EL picture, or NULL if the
++// EL picture is not decoded yet. At the end of the stream (eof), pictures
++// without an EL picture are dropped.
++struct mp_image *mp_cb1_fel_pop(struct mp_cb1_fel *fel, bool eof);
+diff --git a/video/decode/vd_lavc.c b/video/decode/vd_lavc.c
+index 399e1d5..75dd002 100644
+--- a/video/decode/vd_lavc.c
++++ b/video/decode/vd_lavc.c
+@@ -29,6 +29,7 @@
+ #include <libavutil/intreadwrite.h>
+ #include <libavutil/pixdesc.h>
+ 
++#include "config.h"
+ #include "mpv_talloc.h"
+ #include "common/msg.h"
+ #include "options/m_config.h"
+@@ -56,6 +57,10 @@
+ 
+ #include "options/m_option.h"
+ 
++#if HAVE_CB1
++#include "video/decode/cb1_fel.h"
++#endif
++
+ static void init_avctx(struct mp_filter *vd);
+ static void uninit_avctx(struct mp_filter *vd);
+ 
+@@ -84,6 +89,7 @@ struct vd_lavc_params {
+     bool check_hw_profile;
+     char **avopts;
+     int dr;
++    bool dovi_fel;
+ };
+ 
+ static const struct m_opt_choice_alternatives discard_names[] = {
+@@ -115,6 +121,9 @@ const struct m_sub_options vd_lavc_conf = {
+         {"vd-lavc-dr", OPT_CHOICE(dr,
+             {"auto", -1}, {"no", 0}, {"yes", 1})},
+         {"vd-apply-cropping", OPT_BOOL(apply_cropping)},
++#if HAVE_CB1
++        {"vd-lavc-dovi-fel", OPT_BOOL(dovi_fel)},
++#endif
+         {0}
+     },
+     .change_flags = UPDATE_VD,
+@@ -242,6 +251,11 @@ typedef struct lavc_ctx {
+ 
+     AVBufferRef *cached_hw_frames_ctx;
+ 
++#if HAVE_CB1
++    // The decoder of the Dolby Vision enhancement layer, if any
++    struct mp_cb1_fel *fel;
++#endif
++
+     // --- The following fields are protected by dr_lock.
+     mp_mutex dr_lock;
+     bool dr_failed;
+@@ -855,6 +869,14 @@ static void init_avctx(struct mp_filter *vd)
+     if (avcodec_open2(avctx, lavc_codec, NULL) < 0)
+         goto error;
+ 
++#if HAVE_CB1
++    // CB1 maps the EL picture from VA-API surfaces. A copying hwdec gives
++    // the VO no surfaces.
++    if (lavc_param->dovi_fel && ctx->use_hwdec && !ctx->hwdec.copying &&
++        ctx->hwdec.lavc_device == AV_HWDEVICE_TYPE_VAAPI)
++        ctx->fel = mp_cb1_fel_create(vd->log, c, avctx);
++#endif
++
+     // Sometimes, the first packet contains information required for correct
+     // decoding of the rest of the stream. The only currently known case is the
+     // x264 build number (encoded in a SEI element), needed to enable a
+@@ -900,6 +922,11 @@ static void flush_all(struct mp_filter *vd)
+         talloc_free(ctx->requeue_packets[n]);
+     ctx->num_requeue_packets = 0;
+ 
++#if HAVE_CB1
++    // Not in reset_avctx(), which also runs at the end of the stream, while
++    // the last pictures still wait for their EL pictures.
++    mp_cb1_fel_reset(ctx->fel);
++#endif
+     reset_avctx(vd);
+ }
+ 
+@@ -913,6 +940,9 @@ static void uninit_avctx(struct mp_filter *vd)
+     av_buffer_unref(&ctx->cached_hw_frames_ctx);
+ 
+     avcodec_free_context(&ctx->avctx);
++#if HAVE_CB1
++    mp_cb1_fel_destroy(&ctx->fel);
++#endif
+ 
+     av_buffer_unref(&ctx->hwdec_dev);
+ 
+@@ -954,6 +984,11 @@ static int init_generic_hwaccel(struct AVCodecContext *avctx, enum AVPixelFormat
+     // hwaccel supports dynamic surface allocation.
+     if (new_fctx->initial_pool_size)
+         new_fctx->initial_pool_size += ctx->hwdec_opts->hwdec_extra_frames - 1;
++#if HAVE_CB1
++    // Base layer pictures wait for their EL pictures.
++    if (new_fctx->initial_pool_size && ctx->fel)
++        new_fctx->initial_pool_size += MP_CB1_FEL_PENDING;
++#endif
+ 
+     const struct hwcontext_fns *fns =
+         hwdec_get_hwcontext_fns(new_fctx->device_ctx->type);
+@@ -1188,6 +1223,10 @@ static int send_packet(struct mp_filter *vd, struct demux_packet *pkt)
+     int ret = avcodec_send_packet(avctx, pkt ? ctx->avpkt : NULL);
+     if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+         return ret;
++#if HAVE_CB1
++    if (ret >= 0)
++        mp_cb1_fel_send(ctx->fel, avctx, pkt ? ctx->avpkt : NULL);
++#endif
+ 
+     if (ctx->hw_probing && ctx->num_sent_packets < 32 &&
+         ctx->hwdec_opts->software_fallback <= 32)
+@@ -1214,7 +1253,7 @@ static void send_queued_packet(struct mp_filter *vd)
+ }
+ 
+ // Returns whether decoder is still active (!EOF state).
+-static int decode_frame(struct mp_filter *vd)
++static int decode_base_frame(struct mp_filter *vd)
+ {
+     vd_ffmpeg_ctx *ctx = vd->priv;
+     AVCodecContext *avctx = ctx->avctx;
+@@ -1270,12 +1309,47 @@ static int decode_frame(struct mp_filter *vd)
+     mpi->dts = mp_pts_from_av(ctx->pic->pkt_dts, &ctx->codec_timebase);
+     mpi->pkt_duration = mp_pts_from_av(ctx->pic->duration, &ctx->codec_timebase);
+ 
++#if HAVE_CB1
++    if (ctx->fel) {
++        mp_cb1_fel_push(ctx->fel, avctx, mpi, ctx->pic->pts);
++        av_frame_unref(ctx->pic);
++        return ret;
++    }
++#endif
+     av_frame_unref(ctx->pic);
+ 
+     MP_TARRAY_APPEND(ctx, ctx->delay_queue, ctx->num_delay_queue, mpi);
+     return ret;
+ }
+ 
++static int decode_frame(struct mp_filter *vd)
++{
++#if HAVE_CB1
++    vd_ffmpeg_ctx *ctx = vd->priv;
++    // A base layer picture leaves only together with its EL picture. Until
++    // then, the base layer decoder runs on, so that the packets that follow
++    // also reach the EL decoder.
++    while (ctx->fel) {
++        struct mp_image *mpi = mp_cb1_fel_pop(ctx->fel, false);
++        if (mpi) {
++            MP_TARRAY_APPEND(ctx, ctx->delay_queue, ctx->num_delay_queue, mpi);
++            return 0;
++        }
++        int ret = decode_base_frame(vd);
++        if (ret == AVERROR_EOF && ctx->fel) {
++            mpi = mp_cb1_fel_pop(ctx->fel, true);
++            if (mpi) {
++                MP_TARRAY_APPEND(ctx, ctx->delay_queue, ctx->num_delay_queue, mpi);
++                return 0;
++            }
++        }
++        if (ret < 0)
++            return ret;
++    }
++#endif
++    return decode_base_frame(vd);
++}
++
+ static int receive_frame(struct mp_filter *vd, struct mp_frame *out_frame)
+ {
+     vd_ffmpeg_ctx *ctx = vd->priv;

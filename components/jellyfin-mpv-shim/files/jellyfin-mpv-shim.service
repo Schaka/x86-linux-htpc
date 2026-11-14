@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=Jellyfin cast target with mpv (x86-linux-htpc)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+# Without a login, the shim only waits for a prompt that nobody sees. The
+# login comes from components/jellyfin-mpv-shim/login.sh.
+ExecCondition=/usr/bin/grep -q AccessToken %h/.config/jellyfin-mpv-shim/users.json
+ExecStart=%h/.local/bin/jellyfin-mpv-shim
+Restart=on-failure
+RestartSec=5
+# Some states of the shim ignore SIGTERM. systemd then ends it with SIGKILL
+# after this time instead of after the default timeout.
+TimeoutStopSec=5
+
+[Install]
+WantedBy=graphical-session.target

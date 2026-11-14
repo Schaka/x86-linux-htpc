@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Binder calls between the two SELinux domains of the Android processes.
+# The policy of waydroid-selinux runs Android in container_runtime_t, but
+# some Android services of the Android TV image start in spc_t. Without
+# these rules, SELinux denies their binder calls, and Android does not
+# finish its start.
+module htpc-waydroid 1.0;
+
+require {
+	type spc_t;
+	type container_runtime_t;
+	class binder { call transfer };
+}
+
+allow spc_t container_runtime_t:binder { call transfer };
+allow container_runtime_t spc_t:binder { call transfer };

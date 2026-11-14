@@ -1,0 +1,2 @@
+# drm_info, for the check of the connector properties
+drm_info

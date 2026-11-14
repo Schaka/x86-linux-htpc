@@ -1,0 +1,16 @@
+# The install order of the components. A component comes after the
+# components that it needs.
+codecs
+kernel-dv
+bigscreen
+audio-driver
+audio-passthrough
+cb1
+jellyfin-mpv-shim
+waydroid
+android-apps
+youtube-tv
+kodi-dv
+remote-keys
+network-wake
+home-screen

@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Written by the component audio-passthrough of x86-linux-htpc from
+# /etc/x86-linux-htpc/htpc.conf. The install writes this file again.
+
+# The HDMI profile with the most channels, so that decoded PCM reaches the
+# receiver as 7.1 or 5.1. A profile that the user picks in Plasma wins,
+# because WirePlumber stores it and checks the stored profile first.
+device.profile.priority.rules = [
+  {
+    matches = [ { device.name = "~alsa_card.*" } ]
+    actions = {
+      update-props = {
+        priorities = [ "output:hdmi-surround71" "output:hdmi-surround" "output:hdmi-stereo" ]
+      }
+    }
+  }
+]
+
+monitor.alsa.rules = [
+  {
+    matches = [ { node.name = "~alsa_output.*hdmi*" } ]
+    actions = {
+      update-props = {
+        # The formats that PipeWire passes unchanged to the receiver
+        # (AUDIO_PASSTHROUGH_FORMATS).
+        iec958.codecs = [ @CODECS@ ]
+        # A receiver needs about a second to lock on to a new stream. With
+        # an HDMI device that stays open, no start of a sound gets lost.
+        session.suspend-timeout-seconds = @SUSPEND_TIMEOUT@
+      }
+    }
+  }
+]
+
+# The AV receiver sets the volume. PipeWire sends the full level, because
+# its default of 40 % makes decoded sound very quiet. A volume that the
+# user sets later is stored and wins over this default.
+wireplumber.settings = {
+  device.routes.default-sink-volume = 1.0
+}

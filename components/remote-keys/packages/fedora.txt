@@ -1,0 +1,2 @@
+# The air mouse service reads and writes input events with python-evdev.
+python3-evdev

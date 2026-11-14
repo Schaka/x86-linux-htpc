@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Written by the component network-wake of x86-linux-htpc.
+[Unit]
+Description=Wake the TV over the network at login (x86-linux-htpc)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/x86-linux-htpc/wake-devices
+
+[Install]
+WantedBy=graphical-session.target

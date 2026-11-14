@@ -1,0 +1,133 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Starts Kodi with the CB1 engine on its own VT, and switches back to
+# Plasma when Kodi ends.
+#
+#   kodi-dv [KODI_ARGUMENT...]
+#
+# Kodi draws with GBM directly on the display, without a compositor. It
+# needs the DRM master of the card, and KWin holds it while the VT of
+# Plasma is in front. So the launcher asks logind to switch to a free VT.
+# logind then takes the DRM master from KWin, and Kodi gets it when it
+# opens the card. The VT has no login session, so Kodi reads the input
+# devices and the sound card through the groups input and audio of the
+# user.
+import os
+import subprocess
+import sys
+import time
+
+KODI = "/opt/x86-linux-htpc/kodi/bin/kodi"
+CONFIG = "/etc/x86-linux-htpc/htpc.conf"
+# The CB1 mpv of jellyfin-mpv-shim uses VT 8. Kodi uses the next one, so a
+# cast during Kodi does not take the VT of Kodi.
+DEFAULT_VT = 9
+CB1_MPV_VT = 8
+# Kodi refuses GBM when one of these variables names a window system.
+WINDOW_SYSTEM_VARIABLES = ("WAYLAND_DISPLAY", "DISPLAY", "WAYLAND_SOCKET")
+# KWin drops the DRM master a moment after the switch.
+SWITCH_TIMEOUT = 5.0
+MASTER_WAIT = 1.0
+HOME_WAIT = 2.0
+
+
+def config_value(key, default=""):
+    value = default
+    try:
+        with open(CONFIG) as f:
+            for line in f:
+                name, sep, rest = line.strip().partition("=")
+                if sep and name == key:
+                    value = rest.strip().strip('"')
+    except OSError:
+        pass
+    return value
+
+
+def active_vt():
+    try:
+        with open("/sys/class/tty/tty0/active") as f:
+            return int(f.read().strip().removeprefix("tty"))
+    except (OSError, ValueError):
+        return 0
+
+
+def plasma_vt():
+    """The VT of the graphical session of this user"""
+    def logind(*args):
+        result = subprocess.run(["loginctl", *args, "--value"], capture_output=True, text=True)
+        return result.stdout.strip()
+    session = logind("show-user", str(os.getuid()), "-p", "Display")
+    vt = logind("show-session", session, "-p", "VTNr") if session else ""
+    return int(vt) if vt.isdigit() else 0
+
+
+def switch_to(vt):
+    # logind allows the switch to the user of a local session.
+    result = subprocess.run(
+        ["busctl", "call", "org.freedesktop.login1", "/org/freedesktop/login1/seat/seat0",
+         "org.freedesktop.login1.Seat", "SwitchTo", "u", str(vt)],
+        capture_output=True, text=True, timeout=10)
+    if result.returncode != 0:
+        print(f"Cannot switch to VT {vt}: {result.stderr.strip()}", file=sys.stderr)
+        return False
+    return True
+
+
+def show_bigscreen_home():
+    """Plasma Bigscreen shows a launch screen after a tile starts an app, until
+    a window of the app is active. Kodi opens no Plasma window, so the
+    launch screen would stay. The home screen closes it."""
+    subprocess.run(
+        ["busctl", "--user", "call", "org.kde.kglobalaccel", "/component/plasmashell",
+         "org.kde.kglobalaccel.Component", "invokeShortcut", "s", "Toggle Bigscreen Home Screen"],
+        capture_output=True, timeout=10)
+
+
+def kodi_running():
+    result = subprocess.run(["pgrep", "-u", str(os.getuid()), "-x", "kodi.bin"],
+                            capture_output=True)
+    return result.returncode == 0
+
+
+def main():
+    vt_text = config_value("KODI_VT", str(DEFAULT_VT))
+    vt = int(vt_text) if vt_text.isdigit() else DEFAULT_VT
+    if kodi_running():
+        # A second start brings the running Kodi to the front.
+        switch_to(vt)
+        return 0
+    if active_vt() == CB1_MPV_VT:
+        # The CB1 mpv holds the DRM master while its VT is in front.
+        print("The Jellyfin player has the screen. Start Kodi after its video.", file=sys.stderr)
+        return 1
+    previous = active_vt()
+    if previous == vt or not previous:
+        previous = plasma_vt()
+    if not switch_to(vt):
+        return 1
+    deadline = time.monotonic() + SWITCH_TIMEOUT
+    while active_vt() != vt and time.monotonic() < deadline:
+        time.sleep(0.1)
+    time.sleep(MASTER_WAIT)
+    # Kodi reads the keys itself on its own VT. Kodi runs without the
+    # option --standalone, so its power menu offers Exit, and the exit
+    # comes back here.
+    env = {k: v for k, v in os.environ.items() if k not in WINDOW_SYSTEM_VARIABLES}
+    env["XDG_SESSION_TYPE"] = "tty"
+    status = subprocess.run([KODI, *sys.argv[1:]], env=env).returncode
+    if previous and active_vt() == vt:
+        switch_to(previous)
+        # KWin takes the screen back a moment after the switch. Before that,
+        # Plasma ignores the shortcut, and the launch screen stays.
+        deadline = time.monotonic() + SWITCH_TIMEOUT
+        while active_vt() != previous and time.monotonic() < deadline:
+            time.sleep(0.1)
+        time.sleep(HOME_WAIT)
+        show_bigscreen_home()
+    return status
+
+
+if __name__ == "__main__":
+    sys.exit(main())

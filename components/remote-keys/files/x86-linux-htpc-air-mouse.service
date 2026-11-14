@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Written by the component remote-keys of x86-linux-htpc.
+[Unit]
+Description=OK of an air mouse as click or Enter (x86-linux-htpc)
+After=systemd-udevd.service
+
+[Service]
+ExecStart=/usr/local/libexec/x86-linux-htpc/air-mouse
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

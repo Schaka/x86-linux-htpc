@@ -1,0 +1,42 @@
+# The kernel patch series for Dolby Vision and HDR10+ on HDMI.
+#
+# It fits Linux 7.3. kernel/apply-series.sh applies the lines in order.
+#
+#   upstream PATH SHA256  a file of libreelec-x86-DV at UPSTREAM_COMMIT in
+#                         kernel/upstream.conf, with its checksum
+#   local FILE            a file in kernel/patches/
+#
+# Order: the upstream project applies its patches in file name order, with
+# the patches of packages/linux/patches/default/ first. The series keeps
+# that order, because later patches build on earlier ones.
+#
+# Left out:
+#   0102-wifi-mt76-*, 0062-imon-*, 9901-pm-*: no relation to video
+#   linux-9920, 9921, 9925, 9930, 9946: AMD display. The project targets
+#     Intel GPUs.
+#   linux-9950-*: support for newer Intel chips (Wildcat Lake, Panther Lake).
+#     Two of them are part of Linux 7.3 already.
+
+upstream packages/linux/patches/default/9900-i915-10bit-hack.patch 79e95885b65f08fc5509eecac8d737e25ef3e1afcbeff6b647e63f97223e15a7
+upstream projects/Generic/patches/linux/0101-drm-edid-add-half-sbs-1080p-stereo-modes.patch e15386346771ced1a127e1c0979ba38388d43cd40c363ed38d310835df821516
+upstream projects/Generic/patches/linux/linux-9900-00-drivers__gpu__drm__i915__display__intel_atomic.c.patch 3b9dffaf988e37bc36c3c654aaa2f729b46ce6dbd069452b0e68ad261fa288eb
+upstream projects/Generic/patches/linux/linux-9900-01-drivers__gpu__drm__i915__display__intel_display.c.patch 3fda480544ce48c2dd9e8e2b39e7bf98bc735521bd3a85fc13644106835fe028
+upstream projects/Generic/patches/linux/linux-9900-02-drivers__gpu__drm__i915__display__intel_display_params.c.patch 687342587646cfff52b26f217cbcc80c8cad40725324e192de67a578d6fdcd0b
+upstream projects/Generic/patches/linux/linux-9900-03-drivers__gpu__drm__i915__display__intel_display_params.h.patch 5806619184d5f1b308e62a5ad664fee8720c18370a35cd03b91646e6cba4be1d
+upstream projects/Generic/patches/linux/linux-9900-04-drivers__gpu__drm__i915__display__intel_display_types.h.patch fb6e6206ce6033e6331b02945ace84aad60c09d83380bb102fca328a5ad54199
+upstream projects/Generic/patches/linux/linux-9900-05-drivers__gpu__drm__i915__display__intel_dv_lab_policy.h.patch f8d606ad767be8a20bc243e2b512804fffca3b8052d00a901aa265d091a36380
+upstream projects/Generic/patches/linux/linux-9900-06-drivers__gpu__drm__i915__display__intel_dvbridge_hdr_policy.h.patch 255ed576924b3abfbd82cd2533336e3b0fa3f423dd601cf28498b625334fe2fd
+upstream projects/Generic/patches/linux/linux-9900-07-drivers__gpu__drm__i915__display__intel_hdmi.c.patch f303a2d0590b1ad2a40f24ad50c043e7188974c38c4a1a22f6330fc624c0d063
+upstream projects/Generic/patches/linux/linux-9900-08-drivers__video__hdmi.c.patch 6446b66d254ac934ce0dddd3b3fcd47c41b3af5c8f522579832294b753114a38
+upstream projects/Generic/patches/linux/linux-9900-09-include__linux__hdmi.h.patch fc52a46f7745449a0bfd6fe499050c8147dfe32b59d8a3a6f3c08e8b87f7cd91
+upstream projects/Generic/patches/linux/linux-9901-native-hdmi-level-shifter.patch 09525288b5514cb4595bfffb6c513fc2e1a9f20d47b1a75cbeb3c1db7cc64731
+upstream projects/Generic/patches/linux/linux-9902-hdmi-compatibility.patch b6c36cd58b7aa6eefa4a1543c7247088e822239fc4a241a32d2bffd49a8b47d3
+upstream projects/Generic/patches/linux/linux-9904-hdr10-conversion.patch 511c761000493be9aeb502fa6e619e8c5acf048a5ec22ae89c1f0f3cd0610b7e
+upstream projects/Generic/patches/linux/linux-9910-common-dv-policy.patch 591d0e319966276f5b236a959fdd35fd5a81e57d4208bf589b28ad8fcf4c82d1
+upstream projects/Generic/patches/linux/linux-9940-hdr10plus.patch cd44a2848195a2c4e0137345d345dfd922cf142b0a103420ce5dc19ae3e26029
+upstream projects/Generic/patches/linux/linux-9941-hdr10plus-presentation-contract.patch 8ec11f29dd01709a3ed55e17c428662c8781ebd1caf8a3b849f5f1fe8a45aabb
+local linux-9942-intel-hdr10plus-internal-recovery.patch
+upstream projects/Generic/patches/linux/linux-9943-intel-hdmi-scdc-diagnostics.patch 5d6822eb4ddbada4c9751f6c0392d86eba93d55e531e60b7819e0f8a0afffc87
+upstream projects/Generic/patches/linux/linux-9944-intel-hdmi-deferred-link-check.patch e73a5a3c32a8a83781dcf693bf6f096921526b910ab7373a17ddde8b62bb425b
+upstream projects/Generic/patches/linux/linux-9945-lldv-format-lab.patch 78ac32981ffda9cb0de8180cb1e829392f2b9eaedd46c646eefcded84ec27beb
+upstream projects/Generic/patches/linux/linux-9948-intel-hdmi-ready-recovery.patch c10f4aa258ca6d2be95a175006389362ccfad3566cff1e892f0b162faf486780

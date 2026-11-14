@@ -1,0 +1,171 @@
+DRM output on its own VT without root.
+
+Adds --drm-vt=N. When the DRM output starts, it asks logind to switch to
+VT N. logind allows this to the user of a local session, and it drops the
+DRM master of the compositor on the other VT. mpv needs libsystemd for
+the call.
+
+Adds --drm-master-wait=SECONDS. A player without root gets the DRM master
+only when no other program holds it. The DRM output opens the card again
+until it gets the master, or until the time runs out.
+
+A mode in --drm-mode that the display does not have falls back to the
+preferred mode, so that a player can ask for the refresh rate of each
+video.
+
+License: the license of mpv.
+diff --git a/meson.build b/meson.build
+index 7320633..eeb69a6 100644
+--- a/meson.build
++++ b/meson.build
+@@ -958,6 +958,13 @@ drm = dependency('libdrm', version: '>= 2.4.105', required: get_option('drm'))
+ libdisplay_info = dependency('libdisplay-info', version: '>= 0.1.1', required: get_option('drm'))
+ features += {'drm': drm.found() and libdisplay_info.found() and
+              (features['vt.h'] or features['consio.h'] or features['wsdisplay-usl-io.h'])}
++# logind switches the VT for the DRM output (--drm-vt).
++libsystemd = dependency('libsystemd', required: false)
++features += {'drm-logind': features['drm'] and libsystemd.found()}
++if features['drm-logind']
++    dependencies += libsystemd
++endif
++
+ if features['drm']
+     dependencies += [drm, libdisplay_info]
+     sources += files('video/drmprime.c',
+diff --git a/video/out/drm_common.c b/video/out/drm_common.c
+index 9ea0103..6c41190 100644
+--- a/video/out/drm_common.c
++++ b/video/out/drm_common.c
+@@ -37,6 +37,10 @@
+ #include <dev/wscons/wsdisplay_usl_io.h>
+ #endif
+ 
++#if HAVE_DRM_LOGIND
++#include <systemd/sd-bus.h>
++#endif
++
+ #include "drm_atomic.h"
+ #include "drm_common.h"
+ 
+@@ -106,6 +110,8 @@ const struct m_sub_options drm_conf = {
+             {"no", 0}, {"yes", 1}, {"auto", -1})},
+         {"drm-dvbridge", OPT_CHOICE(dvbridge, {"no", DRM_DVBRIDGE_OFF},
+             {"dolby-vision", DRM_DVBRIDGE_DOLBY_VISION}, {"hdr10", DRM_DVBRIDGE_HDR10})},
++        {"drm-vt", OPT_INT(vt), M_RANGE(0, 63)},
++        {"drm-master-wait", OPT_DOUBLE(master_wait), M_RANGE(0, 30)},
+         {0},
+     },
+     .defaults = &(const struct drm_opts) {
+@@ -833,6 +839,8 @@ static bool mode_match(const drmModeModeInfo *mode,
+     }
+ }
+ 
++static bool setup_mode_preferred(struct vo_drm_state *drm);
++
+ static bool setup_mode_by_numbers(struct vo_drm_state *drm,
+                                   unsigned int width,
+                                   unsigned int height,
+@@ -846,8 +854,11 @@ static bool setup_mode_by_numbers(struct vo_drm_state *drm,
+         }
+     }
+ 
+-    MP_ERR(drm, "Could not find mode matching %s\n", drm->opts->mode_spec);
+-    return false;
++    // A player that picks the refresh rate of each video cannot know all
++    // modes of the display. The video then plays in the preferred mode.
++    MP_WARN(drm, "Could not find mode matching %s. Using the preferred mode.\n",
++            drm->opts->mode_spec);
++    return setup_mode_preferred(drm);
+ }
+ 
+ static bool setup_mode_preferred(struct vo_drm_state *drm)
+@@ -1077,6 +1088,61 @@ int vo_drm_control(struct vo *vo, int *events, int request, void *arg)
+     return VO_NOTIMPL;
+ }
+ 
++// The kernel shows one VT at a time. logind switches it for the user of a
++// local session, so a player without root can take the screen from the
++// compositor on another VT. The switch runs here and not in a script,
++// because the player core does not answer scripts while the output starts.
++static void switch_vt(struct vo_drm_state *drm)
++{
++    int vt = drm->opts->vt;
++    if (vt <= 0)
++        return;
++#if HAVE_DRM_LOGIND
++    sd_bus *bus = NULL;
++    sd_bus_error error = SD_BUS_ERROR_NULL;
++    int r = sd_bus_open_system(&bus);
++    if (r >= 0) {
++        r = sd_bus_call_method(bus, "org.freedesktop.login1",
++                               "/org/freedesktop/login1/seat/seat0",
++                               "org.freedesktop.login1.Seat", "SwitchTo",
++                               &error, NULL, "u", (uint32_t)vt);
++    }
++    if (r < 0) {
++        MP_ERR(drm, "Cannot switch to VT %d: %s\n", vt,
++               error.message ? error.message : mp_strerror(-r));
++    }
++    sd_bus_error_free(&error);
++    sd_bus_unref(bus);
++#else
++    MP_ERR(drm, "--drm-vt needs an mpv built with libsystemd.\n");
++#endif
++}
++
++// A program without root gets the DRM master only when it opens the card
++// while no other program holds the master. A compositor on another VT holds
++// it until logind drops it at the switch to the VT of the player. The switch
++// can still run when the output starts, so the output opens the card again
++// until it gets the master.
++static bool wait_for_master(struct vo_drm_state *drm)
++{
++    int64_t deadline = mp_time_ns_add(mp_time_ns(), drm->opts->master_wait);
++    while (drm->opts->master_wait > 0 && !drmIsMaster(drm->fd)) {
++        if (mp_time_ns() > deadline) {
++            MP_ERR(drm, "No DRM master after %g seconds.\n", drm->opts->master_wait);
++            return false;
++        }
++        close(drm->fd);
++        mp_sleep_ns(MP_TIME_MS_TO_NS(20));
++        drm->fd = open_card_path(drm->card_path);
++        if (drm->fd < 0) {
++            MP_ERR(drm, "Cannot open card \"%d\": %s.\n", drm->card_no,
++                   mp_strerror(errno));
++            return false;
++        }
++    }
++    return true;
++}
++
+ bool vo_drm_init(struct vo *vo)
+ {
+     vo->drm = talloc_zero(NULL, struct vo_drm_state);
+@@ -1108,11 +1174,14 @@ bool vo_drm_init(struct vo *vo)
+         goto err;
+     }
+ 
++    switch_vt(drm);
+     drm->fd = open_card_path(drm->card_path);
+     if (drm->fd < 0) {
+         MP_ERR(drm, "Cannot open card \"%d\": %s.\n", drm->card_no, mp_strerror(errno));
+         goto err;
+     }
++    if (!wait_for_master(drm))
++        goto err;
+ 
+     drmVersionPtr ver = drmGetVersion(drm->fd);
+     if (ver) {
+diff --git a/video/out/drm_common.h b/video/out/drm_common.h
+index 4fab3b3..1a4af6e 100644
+--- a/video/out/drm_common.h
++++ b/video/out/drm_common.h
+@@ -109,6 +109,8 @@ struct drm_opts {
+     struct m_geometry draw_surface_size;
+     int vrr_enabled;
+     int dvbridge;
++    int vt;
++    double master_wait;
+ };
+ 
+ // The CB1 output modes of --drm-dvbridge. The values match --cb1.

@@ -1,0 +1,35 @@
+# The libraries of the Kodi build in /opt/x86-linux-htpc/kodi. kodi/build.sh
+# links them from the distribution. Kodi has its own Python, which needs
+# libffi and OpenSSL 3.
+alsa-lib
+exiv2-libs
+fmt
+fontconfig
+fribidi
+fstrcmp
+harfbuzz
+inih-cpp
+libass
+libcdio
+libcec
+libcurl
+libdav1d
+libdrm
+libinput
+libmicrohttpd
+libudfread
+libva
+libxkbcommon
+libxslt
+lua-libs
+lzo
+mesa-libgbm
+pipewire-libs
+spdlog
+sqlite-libs
+taglib
+tinyxml
+tinyxml2
+libffi
+openssl-libs
+openssl3-libs

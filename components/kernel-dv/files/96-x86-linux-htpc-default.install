@@ -1,0 +1,22 @@
+#!/usr/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# kernel-install plugin of x86-linux-htpc (component kernel-dv).
+#
+# Fedora makes each new kernel the default (95-set-boot-entry.install). A
+# stock kernel from a normal update has no Dolby Vision patches, so after its
+# install this plugin makes the newest patched kernel the default again. The
+# stock kernel stays in the boot menu as a fallback. A new patched kernel
+# goes through the test start of the component kernel-dv instead.
+
+COMMAND="$1"
+KERNEL_VERSION="$2"
+
+[[ "${COMMAND}" == add ]] || exit 0
+[[ "${KERNEL_VERSION}" != *.htpc.* ]] || exit 0
+
+newest_patched="$(find /boot -maxdepth 1 -name 'vmlinuz-*.htpc.*' | sort -V | tail -n 1)"
+[[ -n "${newest_patched}" ]] || exit 0
+
+grubby --set-default "${newest_patched}" >/dev/null 2>&1
+echo "x86-linux-htpc: the default kernel stays ${newest_patched#/boot/vmlinuz-}, not the new stock kernel ${KERNEL_VERSION}."

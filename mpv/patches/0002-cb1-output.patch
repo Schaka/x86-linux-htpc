@@ -1,0 +1,584 @@
+CB1 output in vo_gpu_next.
+
+Adds --cb1 to vo_gpu_next. It takes the mode dolby-vision or hdr10, the
+same mode as --drm-dvbridge. CB1 draws each hardware decoded Dolby Vision
+frame into the swapchain. A frame that carries an enhancement layer
+picture in mp_image.dovi_el gives it to CB1 together with the base layer.
+docs/cb1-integration.md of x86-linux-htpc describes the design.
+
+License: the license of mpv (GPL-2.0-or-later for the new files).
+diff --git a/meson.build b/meson.build
+index fb10be5..f15893e 100644
+--- a/meson.build
++++ b/meson.build
+@@ -1245,6 +1245,17 @@ if features['egl-drm']
+     sources += files('video/out/opengl/context_drm_egl.c')
+ endif
+ 
++# CB1 is GPL, and it draws only through OpenGL ES on the DRM output.
++cb1 = dependency('cb1', required: get_option('cb1').require(
++    features['gpl'] and features['egl-drm'],
++    error_message: 'cb1 needs a GPL build with egl-drm!',
++))
++features += {'cb1': cb1.found()}
++if features['cb1']
++    dependencies += cb1
++    sources += files('video/out/gpu_next/cb1.c')
++endif
++
+ egl_wayland_opt = get_option('egl-wayland').require(
+     features['egl'] and features['wayland'] and gl_allowed,
+     error_message: 'either egl or wayland could not be found!',
+diff --git a/meson.options b/meson.options
+index 52782f7..3169a4e 100644
+--- a/meson.options
++++ b/meson.options
+@@ -68,6 +68,7 @@ option('egl-angle', type: 'feature', value: 'auto', description: 'OpenGL ANGLE h
+ option('egl-angle-lib', type: 'feature', value: 'auto', description: 'OpenGL Win32 ANGLE library')
+ option('egl-angle-win32', type: 'feature', value: 'auto', description: 'OpenGL Win32 ANGLE backend')
+ option('egl-drm', type: 'feature', value: 'auto', description: 'OpenGL DRM EGL backend')
++option('cb1', type: 'feature', value: 'disabled', description: 'CB1 Dolby Vision engine (needs the CB1 builds of FFmpeg and libplacebo)')
+ option('egl-wayland', type: 'feature', value: 'auto', description: 'OpenGL Wayland backend')
+ option('egl-x11', type: 'feature', value: 'auto', description: 'OpenGL X11 EGL backend')
+ option('gbm', type: 'feature', value: 'auto', description: 'Generic Buffer Manager (GBM)')
+diff --git a/video/mp_image.c b/video/mp_image.c
+index d1a85e7..bef4705 100644
+--- a/video/mp_image.c
++++ b/video/mp_image.c
+@@ -236,6 +236,8 @@ static void mp_image_destructor(void *ptr)
+     av_buffer_unref(&mpi->icc_profile);
+     av_buffer_unref(&mpi->a53_cc);
+     av_buffer_unref(&mpi->dovi);
++    av_buffer_unref(&mpi->dovi_av);
++    av_buffer_unref(&mpi->dovi_el);
+     av_buffer_unref(&mpi->film_grain);
+     for (int n = 0; n < mpi->num_ff_side_data; n++)
+         av_buffer_unref(&mpi->ff_side_data[n].buf);
+@@ -370,6 +372,8 @@ struct mp_image *mp_image_new_ref(struct mp_image *img)
+     ref_buffer(&new->icc_profile);
+     ref_buffer(&new->a53_cc);
+     ref_buffer(&new->dovi);
++    ref_buffer(&new->dovi_av);
++    ref_buffer(&new->dovi_el);
+     ref_buffer(&new->film_grain);
+ 
+     new->ff_side_data = talloc_memdup(NULL, new->ff_side_data,
+@@ -407,6 +411,8 @@ struct mp_image *mp_image_new_dummy_ref(struct mp_image *img)
+     new->icc_profile = NULL;
+     new->a53_cc = NULL;
+     new->dovi = NULL;
++    new->dovi_av = NULL;
++    new->dovi_el = NULL;
+     new->film_grain = NULL;
+     new->num_ff_side_data = 0;
+     new->ff_side_data = NULL;
+@@ -576,6 +582,8 @@ void mp_image_copy_attributes(struct mp_image *dst, struct mp_image *src)
+     }
+     assign_bufref(&dst->icc_profile, src->icc_profile);
+     assign_bufref(&dst->dovi, src->dovi);
++    assign_bufref(&dst->dovi_av, src->dovi_av);
++    assign_bufref(&dst->dovi_el, src->dovi_el);
+     assign_bufref(&dst->film_grain, src->film_grain);
+     assign_bufref(&dst->a53_cc, src->a53_cc);
+ 
+@@ -1182,6 +1190,8 @@ struct mp_image *mp_image_from_av_frame(struct AVFrame *src)
+     AVBufferRef *dovi = NULL;
+     sd = av_frame_get_side_data(src, AV_FRAME_DATA_DOVI_METADATA);
+     if (sd) {
++        dst->dovi_av = av_buffer_ref(sd->buf);
++        MP_HANDLE_OOM(dst->dovi_av);
+ #ifdef PL_HAVE_LAV_DOLBY_VISION
+         const AVDOVIMetadata *metadata = (const AVDOVIMetadata *)sd->buf->data;
+         const AVDOVIRpuDataHeader *header = av_dovi_get_header(metadata);
+diff --git a/video/mp_image.h b/video/mp_image.h
+index 5fe523d..759fc13 100644
+--- a/video/mp_image.h
++++ b/video/mp_image.h
+@@ -121,6 +121,13 @@ typedef struct mp_image {
+     struct AVBufferRef *a53_cc;
+     // Dolby Vision metadata, if any
+     struct AVBufferRef *dovi;
++    // The original AVDOVIMetadata of FFmpeg, if any. The CB1 engine reads
++    // it, because it needs all fields, also those of files with a second
++    // layer.
++    struct AVBufferRef *dovi_av;
++    // The decoded enhancement layer picture of a Dolby Vision profile 7
++    // stream, as an AVFrame in the data of the buffer, if any.
++    struct AVBufferRef *dovi_el;
+     // Film grain data, if any
+     struct AVBufferRef *film_grain;
+     // Other side data we don't care about.
+diff --git a/video/out/gpu_next/cb1.c b/video/out/gpu_next/cb1.c
+new file mode 100644
+index 0000000..dcfc2dd
+--- /dev/null
++++ b/video/out/gpu_next/cb1.c
+@@ -0,0 +1,287 @@
++/*
++ * This file is part of mpv.
++ *
++ * mpv is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * mpv is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with mpv.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <math.h>
++
++#include <libavutil/buffer.h>
++#include <libavutil/frame.h>
++#include <libplacebo/opengl.h>
++
++#include <dvbridge_dmabuf.h>
++#include <dvbridge_gl_frame.h>
++#include <dvbridge_placebo.h>
++#include <dvbridge_render.h>
++
++#include "cb1.h"
++#include "common/msg.h"
++#include "mpv_talloc.h"
++#include "video/img_format.h"
++#include "video/mp_image.h"
++
++// The HDR10 output is 10 bits for each color in full range, as the
++// XRGB2101010 framebuffer carries it.
++#define HDR10_BITS 10
++
++struct mp_cb1 {
++    struct mp_log *log;
++    pl_gpu gpu;
++    struct dvbridge_renderer *renderer;
++    enum mp_cb1_mode mode;
++    // The HDR10 target of the current video, from its first frame
++    struct dvbridge_hdr10_session session;
++    bool have_session;
++    // A drawn picture waits for its presentation.
++    bool prepared;
++    // Log each reason for a fallback once, not for each frame.
++    const char *last_failure;
++    // The kind of the enhancement layer of the last frame, for the log
++    const char *last_layer;
++};
++
++struct mp_cb1 *mp_cb1_create(struct mp_log *log, pl_gpu gpu, enum mp_cb1_mode mode)
++{
++    if (!pl_opengl_get(gpu)) {
++        mp_err(log, "CB1 needs --gpu-api=opengl.\n");
++        return NULL;
++    }
++    struct dvbridge_renderer *renderer = dvbridge_renderer_create(gpu);
++    if (!renderer) {
++        mp_err(log, "CB1 failed to start.\n");
++        return NULL;
++    }
++    struct mp_cb1 *cb1 = talloc_zero(NULL, struct mp_cb1);
++    *cb1 = (struct mp_cb1) {
++        .log = log,
++        .gpu = gpu,
++        .renderer = renderer,
++        .mode = mode,
++    };
++    mp_info(log, "CB1 Dolby Vision engine started, output %s.\n",
++            mode == MP_CB1_HDR10 ? "HDR10" : "Dolby Vision");
++    return cb1;
++}
++
++void mp_cb1_destroy(struct mp_cb1 **cb1p)
++{
++    struct mp_cb1 *cb1 = *cb1p;
++    if (!cb1)
++        return;
++    dvbridge_renderer_destroy(cb1->renderer);
++    talloc_free(cb1);
++    *cb1p = NULL;
++}
++
++void mp_cb1_reset(struct mp_cb1 *cb1)
++{
++    if (!cb1)
++        return;
++    dvbridge_renderer_reset(cb1->renderer);
++    cb1->have_session = false;
++    cb1->prepared = false;
++    cb1->last_layer = NULL;
++}
++
++static bool fail(struct mp_cb1 *cb1, const char *reason)
++{
++    if (cb1->last_failure != reason)
++        MP_WARN(cb1, "CB1 does not draw this frame: %s\n", reason);
++    cb1->last_failure = reason;
++    return false;
++}
++
++// CB1 imports the GL textures of the decoder itself, with its own color
++// representation of each layout, as in the Kodi integration.
++static bool import_frame(struct mp_cb1 *cb1, const struct pl_frame *image,
++                         const struct mp_image *mpi,
++                         struct dvbridge_gl_frame *out)
++{
++    enum dvbridge_gl_layout layout;
++    switch (mpi->params.hw_subfmt) {
++    case IMGFMT_NV12: layout = DVBRIDGE_NV12; break;
++    case IMGFMT_P010: layout = DVBRIDGE_P010; break;
++    default: return false;
++    }
++    if (image->num_planes != 2)
++        return false;
++
++    struct dvbridge_gl_plane planes[3] = {0};
++    for (int i = 0; i < image->num_planes; i++) {
++        pl_tex tex = image->planes[i].texture;
++        planes[i] = (struct dvbridge_gl_plane) {
++            .texture = pl_opengl_unwrap(cb1->gpu, tex, NULL, NULL, NULL),
++            .width = tex->params.w,
++            .height = tex->params.h,
++        };
++        if (!planes[i].texture)
++            return false;
++    }
++    if (!dvbridge_gl_frame_import(out, cb1->gpu, layout, mpi->params.w,
++                                  mpi->params.h, planes))
++        return false;
++    dvbridge_gl_frame_set_chroma(out, mpi->params.chroma_location);
++    return true;
++}
++
++// The EL picture of a profile 7 stream is a VA-API surface of the EL
++// decoder of video/decode/cb1_fel.c. CB1 imports it through DMA-BUF.
++static bool import_enhancement(struct mp_cb1 *cb1, const AVFrame *el,
++                               struct dvbridge_dmabuf *dmabuf,
++                               struct dvbridge_gl_frame *out)
++{
++    if (!dvbridge_dmabuf_import(dmabuf, el))
++        return false;
++    if (!dvbridge_gl_frame_import(out, cb1->gpu, dmabuf->layout, el->width,
++                                  el->height, dmabuf->planes))
++    {
++        dvbridge_dmabuf_release(dmabuf);
++        return false;
++    }
++    // Profile 7 streams without a chroma location use top left, as Kodi
++    // does.
++    dvbridge_gl_frame_set_chroma(out, el->chroma_location == AVCHROMA_LOC_UNSPECIFIED ?
++                                      PL_CHROMA_TOP_LEFT :
++                                      dvbridge_map_chroma(el->chroma_location));
++    return true;
++}
++
++// The EL of profile 7 is either a full enhancement layer (FEL) with
++// picture data, or a minimal one (MEL) without. Only the RPU tells.
++static void log_layer(struct mp_cb1 *cb1, bool paired, const void *metadata,
++                      size_t bytes)
++{
++    const char *layer = "none";
++    struct dvbridge_color color;
++    if (paired) {
++        layer = dvbridge_map_color(&color, metadata, bytes, true) &&
++                color.dovi.nlq_active ? "FEL" : "MEL";
++    }
++    if (cb1->last_layer != layer)
++        MP_INFO(cb1, "CB1 enhancement layer: %s\n", layer);
++    cb1->last_layer = layer;
++}
++
++bool mp_cb1_render(struct mp_cb1 *cb1, const struct pl_frame *image,
++                   struct mp_image *mpi, struct mp_rect dst, pl_tex target,
++                   bool flipped, struct pl_color_space *color)
++{
++    if (!mpi->dovi_av)
++        return fail(cb1, "the frame has no Dolby Vision metadata");
++    if (!mpi->hwctx)
++        return fail(cb1, "the frame is not hardware decoded");
++    if (!isfinite(mpi->pts))
++        return fail(cb1, "the frame has no timestamp");
++
++    const void *metadata = mpi->dovi_av->data;
++    size_t bytes = mpi->dovi_av->size;
++    bool hdr10 = cb1->mode == MP_CB1_HDR10;
++    if (hdr10 && !cb1->have_session) {
++        if (!dvbridge_hdr10_session_init(&cb1->session, metadata, bytes))
++            return fail(cb1, "the Dolby Vision metadata gives no HDR10 target");
++        cb1->have_session = true;
++    }
++
++    // Hardware frames get their textures only between acquire and release,
++    // as libplacebo does it for its own rendering.
++    struct pl_frame mapped = *image;
++    if (mapped.acquire && !mapped.acquire(cb1->gpu, &mapped))
++        return fail(cb1, "the hardware frame cannot be mapped");
++
++    struct dvbridge_gl_frame frame = {0};
++    if (!import_frame(cb1, &mapped, mpi, &frame)) {
++        if (mapped.release)
++            mapped.release(cb1->gpu, &mapped);
++        return fail(cb1, "CB1 cannot import this frame format");
++    }
++
++    // CB1 needs the same time for both layers. The EL decoder paired them
++    // by this time.
++    struct dvbridge_dmabuf el_dmabuf = {0};
++    struct dvbridge_gl_frame el = {0};
++    double el_pts = NAN;
++    if (mpi->dovi_el) {
++        if (!import_enhancement(cb1, (const AVFrame *)mpi->dovi_el->data,
++                                &el_dmabuf, &el))
++        {
++            dvbridge_gl_frame_release(&frame);
++            if (mapped.release)
++                mapped.release(cb1->gpu, &mapped);
++            return fail(cb1, "CB1 cannot import the enhancement layer picture");
++        }
++        frame.frame.enhancement_layer = &el.frame;
++        el_pts = mpi->pts;
++    }
++
++    struct dvbridge_geometry geometry = {
++        .source_width = mpi->params.w,
++        .source_height = mpi->params.h,
++        .x = dst.x0,
++        .y = dst.y0,
++        .width = mp_rect_w(dst),
++        .height = mp_rect_h(dst),
++        .target_width = target->params.w,
++        .target_height = target->params.h,
++    };
++    bool ok;
++    if (!hdr10) {
++        ok = dvbridge_render_packed(cb1->renderer, &frame.frame, metadata, bytes,
++                                    mpi->pts, el_pts, geometry, target, flipped);
++    } else if (!geometry.x && !geometry.y && geometry.width == geometry.target_width &&
++               geometry.height == geometry.target_height) {
++        // A video that fills the screen goes directly into the target.
++        ok = dvbridge_render_hdr10_direct(cb1->renderer, &cb1->session, &frame.frame,
++                                          metadata, bytes, mpi->pts, el_pts, geometry,
++                                          target, flipped, false, HDR10_BITS);
++    } else {
++        ok = dvbridge_render_hdr10_rgb(cb1->renderer, &cb1->session, &frame.frame,
++                                       metadata, bytes, mpi->pts, el_pts, geometry) &&
++             dvbridge_render_hdr10(cb1->renderer, target, flipped, false, HDR10_BITS);
++    }
++    if (mpi->dovi_el) {
++        dvbridge_gl_frame_release(&el);
++        dvbridge_dmabuf_release(&el_dmabuf);
++    }
++    dvbridge_gl_frame_release(&frame);
++    if (mapped.release)
++        mapped.release(cb1->gpu, &mapped);
++    if (!ok)
++        return fail(cb1, "CB1 rendering failed");
++    log_layer(cb1, mpi->dovi_el, metadata, bytes);
++    if (cb1->last_failure)
++        MP_INFO(cb1, "CB1 draws the frames again.\n");
++    cb1->last_failure = NULL;
++    cb1->prepared = true;
++    if (hdr10) {
++        *color = cb1->session.target;
++        // Dolby Vision metadata has no mastering primaries. Without those of
++        // the stream, the output names the BT.2020 container.
++        color->hdr.prim = pl_primaries_valid(&mpi->params.color.hdr.prim) ?
++                          mpi->params.color.hdr.prim :
++                          *pl_raw_primaries_get(PL_COLOR_PRIM_BT_2020);
++    }
++    return true;
++}
++
++void mp_cb1_presented(struct mp_cb1 *cb1, bool success)
++{
++    if (!cb1 || !cb1->prepared)
++        return;
++    cb1->prepared = false;
++    if (!success || !dvbridge_render_commit(cb1->renderer)) {
++        // A lost picture must not become the reference for the next one.
++        dvbridge_renderer_reset(cb1->renderer);
++    }
++}
+diff --git a/video/out/gpu_next/cb1.h b/video/out/gpu_next/cb1.h
+new file mode 100644
+index 0000000..c02db13
+--- /dev/null
++++ b/video/out/gpu_next/cb1.h
+@@ -0,0 +1,57 @@
++/*
++ * This file is part of mpv.
++ *
++ * mpv is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * mpv is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with mpv.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#pragma once
++
++#include <stdbool.h>
++#include <libplacebo/renderer.h>
++
++#include "common/common.h"
++
++struct mp_cb1;
++struct mp_log;
++struct mp_image;
++
++// The output modes of CB1. The values match --cb1 and --drm-dvbridge.
++enum mp_cb1_mode {
++    MP_CB1_OFF,
++    // TV-led Dolby Vision: the metadata goes in the pixels of the picture.
++    MP_CB1_DOLBY_VISION,
++    // CB1 maps the Dolby Vision picture to HDR10 with static metadata.
++    MP_CB1_HDR10,
++};
++
++// The adapter between vo_gpu_next and the CB1 Dolby Vision engine.
++struct mp_cb1 *mp_cb1_create(struct mp_log *log, pl_gpu gpu, enum mp_cb1_mode mode);
++void mp_cb1_destroy(struct mp_cb1 **cb1);
++
++// Call for each new video. The HDR10 mode takes its static metadata from
++// the first frame of a video.
++void mp_cb1_reset(struct mp_cb1 *cb1);
++
++// Draws the picture of image into target. image must be a hardware
++// decoded frame with its Dolby Vision metadata. dst is the place of the
++// video in target. In the HDR10 mode, color receives the color space of
++// the picture, for the HDR metadata of the output. Returns false if CB1
++// cannot draw this frame. Then the caller draws it the normal way.
++bool mp_cb1_render(struct mp_cb1 *cb1, const struct pl_frame *image,
++                   struct mp_image *mpi, struct mp_rect dst, pl_tex target,
++                   bool flipped, struct pl_color_space *color);
++
++// Call after the swap of a frame that mp_cb1_render() drew. CB1 commits
++// its metadata state only for pictures that reached the screen.
++void mp_cb1_presented(struct mp_cb1 *cb1, bool success);
+diff --git a/video/out/vo_gpu_next.c b/video/out/vo_gpu_next.c
+index 2d95eb8..5f45e07 100644
+--- a/video/out/vo_gpu_next.c
++++ b/video/out/vo_gpu_next.c
+@@ -49,6 +49,10 @@
+ #include "sub/osd.h"
+ #include "gpu_next/context.h"
+ 
++#if HAVE_CB1
++#include "gpu_next/cb1.h"
++#endif
++
+ #if HAVE_GL && defined(PL_HAVE_OPENGL)
+ #include <libplacebo/opengl.h>
+ #include "video/out/opengl/ra_gl.h"
+@@ -136,6 +140,11 @@ struct priv {
+     bool frame_pending;
+ 
+     pl_options pars;
++#if HAVE_CB1
++    struct mp_cb1 *cb1;
++    // The frame of the current swap is a CB1 picture.
++    bool cb1_drawn;
++#endif
+     struct m_config_cache *opts_cache;
+     struct m_config_cache *next_opts_cache;
+     struct gl_next_opts *next_opts;
+@@ -178,6 +187,7 @@ struct gl_next_opts {
+     int target_hint_mode;
+     bool target_hint_strict;
+     char **raw_opts;
++    int cb1;
+ };
+ 
+ const struct m_opt_choice_alternatives lut_types[] = {
+@@ -218,6 +228,10 @@ const struct m_sub_options gl_next_conf = {
+         {"target-colorspace-hint-strict", OPT_BOOL(target_hint_strict)},
+         // No `target-lut-type` because we don't support non-RGB targets
+         {"libplacebo-opts", OPT_KEYVALUELIST(raw_opts)},
++#if HAVE_CB1
++        {"cb1", OPT_CHOICE(cb1, {"no", MP_CB1_OFF},
++            {"dolby-vision", MP_CB1_DOLBY_VISION}, {"hdr10", MP_CB1_HDR10})},
++#endif
+         {0},
+     },
+     .defaults = &(struct gl_next_opts) {
+@@ -1403,8 +1417,27 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
+             update_hook_opts_dynamic(p, p->hooks[i], frame->current);
+     }
+ 
++    bool drawn = false;
++#if HAVE_CB1
++    // CB1 draws Dolby Vision frames without OSD, frame mixing or any
++    // later processing, because the TV reads the metadata from the pixels.
++    p->cb1_drawn = false;
++    if (p->next_opts->cb1 && mix.num_frames) {
++        if (!p->cb1)
++            p->cb1 = mp_cb1_create(p->log, p->gpu, p->next_opts->cb1);
++        const struct pl_frame *image = pl_frame_mix_current(&mix);
++        if (p->cb1 && image) {
++            // In the HDR10 mode, the HDR metadata of the output comes from
++            // CB1 through the color space of the target.
++            drawn = p->cb1_drawn = mp_cb1_render(p->cb1, image, image->user_data,
++                                                 p->dst, swframe.fbo, swframe.flipped,
++                                                 &target.color);
++        }
++    }
++#endif
++
+     // Render frame
+-    if (!pl_render_image_mix(p->rr, &mix, &target, &params)) {
++    if (!drawn && !pl_render_image_mix(p->rr, &mix, &target, &params)) {
+         MP_ERR(vo, "Failed rendering frame!\n");
+         goto done;
+     }
+@@ -1448,13 +1481,21 @@ static void flip_page(struct vo *vo)
+     struct priv *p = vo->priv;
+     struct ra_swapchain *sw = p->ra_ctx->swapchain;
+ 
++    bool submitted = true;
+     if (p->frame_pending) {
+-        if (!pl_swapchain_submit_frame(p->sw))
++        submitted = pl_swapchain_submit_frame(p->sw);
++        if (!submitted)
+             MP_ERR(vo, "Failed presenting frame!\n");
+         p->frame_pending = false;
+     }
+ 
+     sw->fns->swap_buffers(sw);
++
++#if HAVE_CB1
++    if (p->cb1_drawn)
++        mp_cb1_presented(p->cb1, submitted);
++    p->cb1_drawn = false;
++#endif
+ }
+ 
+ static void get_vsync(struct vo *vo, struct vo_vsync_info *info)
+@@ -1507,6 +1548,9 @@ static int reconfig(struct vo *vo, struct mp_image_params *params)
+         return -1;
+ 
+     resize(vo);
++#if HAVE_CB1
++    mp_cb1_reset(p->cb1);
++#endif
+     mp_mutex_lock(&vo->params_mutex);
+     vo->target_params = NULL;
+     mp_mutex_unlock(&vo->params_mutex);
+@@ -2081,6 +2125,9 @@ static void uninit(struct vo *vo)
+ {
+     struct priv *p = vo->priv;
+     pl_queue_destroy(&p->queue); // destroy this first
++#if HAVE_CB1
++    mp_cb1_destroy(&p->cb1);
++#endif
+     for (int i = 0; i < MP_ARRAY_SIZE(p->osd_state.entries); i++)
+         pl_tex_destroy(p->gpu, &p->osd_state.entries[i].tex);
+     for (int i = 0; i < p->num_sub_tex; i++)

@@ -1,0 +1,63 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Sends a Wake-on-LAN packet to each MAC address in WAKE_ON_LAN_MACS of
+# /etc/x86-linux-htpc/htpc.conf. A TV in standby with network wake turns
+# on when its network card gets the packet.
+#
+# The script reads the file as data, like the install scripts. A device
+# that is on already ignores the packet, so a packet too many does no harm.
+import re
+import socket
+import sys
+import time
+
+CONFIG = "/etc/x86-linux-htpc/htpc.conf"
+MAC = re.compile(r"^([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$")
+# Network wake listens on UDP port 9 on most devices, some on port 7.
+PORTS = (9, 7)
+# UDP has no delivery report, and a switch drops the first packets while
+# the port of a TV in deep standby wakes up. So each packet goes out a few
+# times.
+REPEATS = 3
+REPEAT_INTERVAL = 0.5
+
+
+def configured_macs():
+    value = ""
+    try:
+        with open(CONFIG) as f:
+            for line in f:
+                match = re.match(r"^\s*WAKE_ON_LAN_MACS=(.*)$", line.rstrip("\n"))
+                if match:
+                    value = match.group(1).strip().strip('"')
+    except OSError:
+        return []
+    return value.split()
+
+
+def magic_packet(mac):
+    address = bytes.fromhex(re.sub("[:-]", "", mac))
+    return b"\xff" * 6 + address * 16
+
+
+def main():
+    macs = sys.argv[1:] or configured_macs()
+    bad = [mac for mac in macs if not MAC.match(mac)]
+    if bad:
+        sys.exit(f"Not a MAC address: {' '.join(bad)}")
+    if not macs:
+        return
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        for repeat in range(REPEATS):
+            if repeat:
+                time.sleep(REPEAT_INTERVAL)
+            for mac in macs:
+                for port in PORTS:
+                    # "<broadcast>" is the broadcast address of all IPv4 networks.
+                    sock.sendto(magic_packet(mac), ("<broadcast>", port))
+
+
+if __name__ == "__main__":
+    main()

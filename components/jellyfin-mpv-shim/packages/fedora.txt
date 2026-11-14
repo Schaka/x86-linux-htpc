@@ -1,0 +1,7 @@
+pipx
+# PyGObject, for the MPRIS media control of the shim (media keys, KDE Connect)
+python3-gobject
+# libmpv, which jellyfin-mpv-shim loads through python-mpv
+mpv-libs
+# The mpv command, for tests outside of the shim
+mpv

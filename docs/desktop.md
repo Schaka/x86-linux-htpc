@@ -1,0 +1,51 @@
+# Desktop
+
+The TV interface is KDE Plasma Bigscreen. It is a Plasma session for TVs, with large tiles and control by remote keys. It runs on KWin with Wayland.
+
+## Session
+
+| Topic | Design |
+|---|---|
+| Package | `plasma-bigscreen` of the distribution |
+| Login | The display manager logs in the HTPC user automatically and starts the session `plasma-bigscreen-wayland`. Fedora 45 uses Plasma Login Manager, other distributions use SDDM. Both read an `[Autologin]` drop-in file. |
+| Screen lock | Off. The HTPC has no personal data on the screen. |
+| Direct scanout | Off (`KWIN_DRM_NO_DIRECT_SCANOUT=1` in `~/.config/environment.d/`). With the Android TV image of Waydroid on Intel GPUs, the direct scanout of KWin shows black flicker and shifted video on the TV. A screenshot does not show it. The variable applies at the next login. |
+| KWallet | Off. The automatic login has no password to unlock the wallet, so each request of a program would show a password dialog on the TV. |
+| Automatic suspend | Off. A suspended HTPC cannot receive a cast. |
+| Screen edges | No action. The pointer of an air mouse often reaches a corner by accident. In a corner, KWin opens its overview, and a remote cannot close it. |
+| User | A normal user without administrator rights. The user name is in `/etc/x86-linux-htpc/htpc.conf`. |
+
+## Display
+
+At each login, the user service `htpc-display.service` of the component `bigscreen` sets the output mode from the configuration file: the resolution and the refresh rate from `DISPLAY_MODE`, and HDR from `DISPLAY_HDR`. It uses `kscreen-doctor`. A change in the display settings of Plasma lasts until the next login. The players change the refresh rate for each video. [video.md](video.md) explains this.
+
+## Launcher entries
+
+Plasma Bigscreen shows the applications that have a desktop entry (a `.desktop` file). The install scripts add these entries:
+
+| Entry | Starts |
+|---|---|
+| Jellyfin | The library browser of `jellyfin-mpv-shim`. The shim runs in the background and also waits for a cast from a Jellyfin client. |
+| Kodi | Kodi with CB1 on its own VT |
+| Each Android app | The app in Waydroid |
+
+## Home screen
+
+The component `home-screen` sets the apps of the home screen from `HOME_SCREEN_APPS` in the configuration file. The value is a list of desktop file names. The home screen then shows these apps in its Favorites row, and the rows Recent, Applications and Games are off. The search of the home screen still finds all apps.
+
+| Part | Where Bigscreen keeps it |
+|---|---|
+| Favorites | `~/.config/bigscreen-favs`, one group `[Favs][N]` for each app. Bigscreen reads it when the Plasma shell starts, so the component restarts the shell. |
+| Rows | The D-Bus interface `org.kde.biglauncher` of the home screen, methods `setShowRecent`, `setShowApplications` and `setShowGames`. The home screen saves the values itself. |
+
+The Home key of a remote (`Home Page`) runs the global shortcut "Toggle Bigscreen Home Screen". It shows the home screen over an open app, for example over Android. Inside the CB1 mpv, the same key hides the window of `jellyfin-mpv-shim` and goes back to Plasma.
+
+Bigscreen sorts the Favorites row in its own order, not in the order of `HOME_SCREEN_APPS`.
+
+The component comes last in the install order, because the other components add the desktop entries of the apps.
+
+## Power
+
+The HTPC does not suspend by itself. A suspended HTPC cannot receive a cast from Jellyfin. The TV and the receiver turn off over HDMI-CEC. The configuration file can turn on suspend after a time without use.
+
+The power key in Plasma Bigscreen turns off the TV and the receiver over HDMI-CEC. [cec.md](cec.md) lists the CEC events.

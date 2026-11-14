@@ -1,0 +1,163 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Gives an air mouse remote two kinds of OK: a click at the pointer, and
+# Enter for the item with the focus frame.
+#
+# An air mouse sends OK as the left and Back as the right mouse button. The
+# TV interfaces move a focus with the arrow keys, and there OK must be
+# Enter. With the pointer, OK must be a click. So the service decides at
+# each press of OK: if the pointer moved in the last POINTER_TIMEOUT
+# seconds, OK is a left click, else it is Enter. An arrow key ends the
+# pointer use at once. Back is always the key Back.
+#
+# The pointer of an air mouse also moves while the hand presses the arrow
+# keys. So for ARROW_GRACE seconds after an arrow key, OK is always Enter,
+# and movement does not count as pointer use.
+#
+# The service takes the input devices of the receivers in AIR_MOUSE_USB_IDS
+# of /etc/x86-linux-htpc/htpc.conf for itself, and sends all their events
+# through one virtual input device.
+import re
+import select
+import time
+
+import evdev
+from evdev import ecodes
+
+CONFIG = "/etc/x86-linux-htpc/htpc.conf"
+VIRTUAL_NAME = "x86-linux-htpc air mouse"
+POINTER_TIMEOUT = 5.0
+ARROW_GRACE = 2.0
+# A hand never holds a remote still, so a few counts of movement are not a
+# pointer use. Movement counts only above this distance within MOVE_WINDOW.
+MOVE_THRESHOLD = 25
+MOVE_WINDOW = 0.5
+SCAN_INTERVAL = 2.0
+ARROW_KEYS = {ecodes.KEY_UP, ecodes.KEY_DOWN, ecodes.KEY_LEFT, ecodes.KEY_RIGHT}
+
+
+def configured_ids():
+    value = ""
+    try:
+        with open(CONFIG) as f:
+            for line in f:
+                match = re.match(r"^\s*AIR_MOUSE_USB_IDS=(.*)$", line.rstrip("\n"))
+                if match:
+                    value = match.group(1).strip().strip('"')
+    except OSError:
+        pass
+    ids = set()
+    for item in value.split():
+        vendor, _, product = item.partition(":")
+        ids.add((int(vendor, 16), int(product, 16)))
+    return ids
+
+
+def receiver_devices(ids):
+    devices = []
+    for path in evdev.list_devices():
+        try:
+            device = evdev.InputDevice(path)
+        except OSError:
+            continue
+        if (device.info.vendor, device.info.product) in ids and device.name != VIRTUAL_NAME:
+            devices.append(device)
+        else:
+            device.close()
+    return devices
+
+
+def virtual_capabilities():
+    """All keys that a remote or a keyboard can send, and a mouse. The
+    virtual device must exist before a receiver is plugged in, so it cannot
+    copy the keys of the receiver."""
+    keys = [code for code in range(ecodes.KEY_ESC, ecodes.KEY_MICMUTE + 1)]
+    keys += [ecodes.BTN_LEFT, ecodes.BTN_RIGHT, ecodes.BTN_MIDDLE]
+    keys += [code for code in ecodes.KEY.keys() if ecodes.KEY_OK <= code <= ecodes.KEY_MEDIA_REPEAT]
+    rel = [ecodes.REL_X, ecodes.REL_Y, ecodes.REL_WHEEL, ecodes.REL_HWHEEL,
+           ecodes.REL_WHEEL_HI_RES, ecodes.REL_HWHEEL_HI_RES]
+    return {ecodes.EV_KEY: sorted(set(keys)), ecodes.EV_REL: rel}
+
+
+class AirMouse:
+    def __init__(self):
+        self.ids = configured_ids()
+        self.output = evdev.UInput(virtual_capabilities(), name=VIRTUAL_NAME)
+        self.devices = {}
+        self.pointer_used = 0.0
+        self.arrow_used = 0.0
+        self.moves = []
+        # The key that each held OK press sent, so that its release sends
+        # the same key.
+        self.held = {}
+        self.next_scan = 0.0
+
+    def scan(self):
+        self.next_scan = time.monotonic() + SCAN_INTERVAL
+        for device in receiver_devices(self.ids):
+            if device.path in self.devices:
+                device.close()
+                continue
+            try:
+                device.grab()
+            except OSError:
+                device.close()
+                continue
+            self.devices[device.path] = device
+
+    def note_movement(self, value):
+        now = time.monotonic()
+        if now - self.arrow_used <= ARROW_GRACE:
+            self.moves = []
+            return
+        self.moves = [(t, v) for t, v in self.moves if now - t <= MOVE_WINDOW]
+        self.moves.append((now, abs(value)))
+        if sum(v for _, v in self.moves) >= MOVE_THRESHOLD:
+            self.pointer_used = now
+
+    def handle(self, event):
+        if event.type == ecodes.EV_REL:
+            if event.code in (ecodes.REL_X, ecodes.REL_Y):
+                self.note_movement(event.value)
+            self.output.write(event.type, event.code, event.value)
+        elif event.type == ecodes.EV_KEY:
+            self.handle_key(event.code, event.value)
+        elif event.type == ecodes.EV_SYN:
+            self.output.syn()
+
+    def handle_key(self, code, value):
+        if code in ARROW_KEYS and value in (1, 2):
+            self.pointer_used = 0.0
+            self.arrow_used = time.monotonic()
+        if code == ecodes.BTN_RIGHT:
+            code = ecodes.KEY_BACK
+        elif code == ecodes.BTN_LEFT:
+            if value == 1:
+                now = time.monotonic()
+                pointing = (now - self.pointer_used <= POINTER_TIMEOUT
+                            and now - self.arrow_used > ARROW_GRACE)
+                self.held[code] = ecodes.BTN_LEFT if pointing else ecodes.KEY_ENTER
+            code = self.held.get(ecodes.BTN_LEFT, ecodes.KEY_ENTER)
+            if value == 0:
+                self.held.pop(ecodes.BTN_LEFT, None)
+        self.output.write(ecodes.EV_KEY, code, value)
+
+    def run(self):
+        while True:
+            if time.monotonic() >= self.next_scan:
+                self.scan()
+            timeout = max(0.0, self.next_scan - time.monotonic())
+            ready, _, _ = select.select(list(self.devices.values()), [], [], timeout)
+            for device in ready:
+                try:
+                    for event in device.read():
+                        self.handle(event)
+                except OSError:
+                    # The receiver was pulled out.
+                    del self.devices[device.path]
+                    device.close()
+
+
+if __name__ == "__main__":
+    AirMouse().run()

@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# The mpv options of x86-linux-htpc for jellyfin-mpv-shim with the CB1 mpv.
+#
+# The component jellyfin-mpv-shim writes this file at each install, from
+# /etc/x86-linux-htpc/htpc.conf. Put your own options into mpv.conf in the
+# same folder. mpv.conf includes this file in its first line, so a later
+# line in mpv.conf can change each value here.
+
+# CB1 needs OpenGL and the DRM output on its own VT. The DRM output switches
+# to the VT, and waits until logind gives it the screen. scripts/
+# htpc-screen.run switches back to Plasma and passes the remote keys to mpv.
+# scripts/htpc-output.lua sets the CB1 mode, the plane format and the
+# display mode for each video.
+vo=gpu-next
+gpu-api=opengl
+gpu-context=drm
+drm-vt=@VT@
+drm-master-wait=5
+script-opts-append=htpc_output-resolution=@RESOLUTION@
+
+# CB1 reads the video from VA-API surfaces. The second decoder of profile 7
+# FEL files starts only for files with an enhancement layer.
+hwdec=vaapi
+vd-lavc-dovi-fel=yes
+
+# The peak detection of each frame costs more GPU time than an Intel N100
+# class GPU has for a 4K frame. The static metadata of the video is enough.
+hdr-compute-peak=no
+
+fullscreen=yes
+
+# The formats that go unchanged to the AV receiver (AUDIO_PASSTHROUGH_FORMATS)
+audio-spdif=@AUDIO_SPDIF@

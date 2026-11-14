@@ -1,0 +1,5 @@
+plasma-bigscreen
+# The Wayland session file of Bigscreen
+plasma-bigscreen-wayland
+# kscreen-doctor, which sets the output mode and HDR at login
+libkscreen
