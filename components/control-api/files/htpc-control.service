@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Written by the component control-api of x86-linux-htpc.
+[Unit]
+Description=Control API and DLNA renderer of the HTPC (x86-linux-htpc)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+# The service starts the apps in the Plasma session, so it runs as a user
+# service of that session and not as a system service.
+ExecStart=/usr/local/libexec/x86-linux-htpc/htpc-control serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

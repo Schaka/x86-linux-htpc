@@ -44,6 +44,8 @@ The project supports Fedora officially. The scripts keep the distribution-specif
 | [docs/desktop.md](docs/desktop.md) | The Plasma Bigscreen session, start-up, display modes and power |
 | [docs/android-apps.md](docs/android-apps.md) | Waydroid and the Android TV apps for YouTube and Twitch |
 | [docs/tv-control.md](docs/tv-control.md) | The ways to turn the TV on and off, select the input and take remote keys, with and without CEC |
+| [docs/control-api.md](docs/control-api.md) | The REST API and the DLNA renderer that start media on the HTPC and control it |
+| [docs/api.md](docs/api.md) | The paths of the REST API with fields and examples, and the link to the OpenAPI document of the newest release |
 | [docs/home-assistant.md](docs/home-assistant.md) | Home Assistant scripts that turn the TV on and off and start a video on the HTPC |
 | [docs/cec.md](docs/cec.md) | HDMI-CEC with a USB adapter, the remote keys and the power control |
 | [docs/distributions.md](docs/distributions.md) | Fedora support, and the rules that keep the scripts portable |

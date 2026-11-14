@@ -29,7 +29,32 @@ android_ready || {
 	exit 1
 }
 
+# KWin keeps a minimized window minimized when Waydroid shows its interface
+# again. The home action of the control API minimizes the window. So the
+# launcher restores and activates it through a KWin script.
+show_waydroid_window() {
+	local script name=htpc-show-waydroid id
+	script="${XDG_RUNTIME_DIR:-/tmp}/${name}.js"
+	cat >"${script}" <<'SCRIPT'
+for (const w of workspace.windowList()) {
+    if (w.normalWindow && /waydroid/i.test(w.resourceClass + " " + w.desktopFileName)) {
+        w.minimized = false;
+        workspace.activeWindow = w;
+    }
+}
+SCRIPT
+	busctl --user call org.kde.KWin /Scripting org.kde.kwin.Scripting unloadScript s "${name}" >/dev/null 2>&1 || true
+	id="$(busctl --user call org.kde.KWin /Scripting org.kde.kwin.Scripting loadScript ss "${script}" "${name}" 2>/dev/null | awk '{print $2}')"
+	if [[ "${id}" =~ ^[0-9]+$ ]]; then
+		busctl --user call org.kde.KWin "/Scripting/Script${id}" org.kde.kwin.Script run >/dev/null 2>&1 || true
+		sleep 0.5
+	fi
+	busctl --user call org.kde.KWin /Scripting org.kde.kwin.Scripting unloadScript s "${name}" >/dev/null 2>&1 || true
+	rm -f "${script}"
+}
+
 waydroid app launch "${package}"
 # With a running session, show-full-ui only shows the interface and ends.
 # A show-full-ui at the same time as the start of the app shows no window.
-exec waydroid show-full-ui
+waydroid show-full-ui
+show_waydroid_window

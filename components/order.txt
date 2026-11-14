@@ -13,4 +13,5 @@ youtube-tv
 kodi-dv
 remote-keys
 network-wake
+control-api
 home-screen

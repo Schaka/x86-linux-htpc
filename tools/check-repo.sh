@@ -38,10 +38,12 @@ is_excluded() {
 # IPv4 addresses, except the ranges that RFC 5737 reserves for documentation,
 # loopback, and four single digits. The last form is a CEC physical address
 # such as 2.0.0.0, not a network address.
+# 239.255.255.250 is the fixed multicast group of SSDP in the UPnP standard.
 find_ipv4() {
 	grep -noE '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' "$1" |
 		grep -vE ':(192\.0\.2|198\.51\.100|203\.0\.113)\.[0-9]+$' |
 		grep -vE ':127\.0\.0\.1$|:0\.0\.0\.0$' |
+		grep -vE ':239\.255\.255\.250$' |
 		grep -vE ':[0-9]\.[0-9]\.[0-9]\.[0-9]$' || true
 }
 

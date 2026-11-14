@@ -1,0 +1,4 @@
+# The service is one static program. The install downloads it with curl,
+# and the service starts the apps with systemd-run.
+curl
+systemd

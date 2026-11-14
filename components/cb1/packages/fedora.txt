@@ -1,6 +1,7 @@
 # The libraries of the CB1 build in /opt/x86-linux-htpc/cb1. The build in
 # cb1/build-in-container.sh links them from the distribution.
 alsa-lib
+gnutls
 lcms2
 libass
 libdav1d

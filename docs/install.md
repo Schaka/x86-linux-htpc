@@ -41,6 +41,7 @@ The setup shows a default for each question. Press Enter to take it. `./setup.sh
 | `SCREEN_EDGES` | `off` removes the action of the screen corners. Without it, a pointer in a corner opens the overview of KWin. |
 | `WAKE_ON_LAN_MACS` | The TV turns on at login and at each video |
 | `SETUP_BUILD` | Build the CB1, Kodi and kernel packages now |
+| `SETUP_CONTROL` | The control API and DLNA renderer for Home Assistant and phones ([control-api.md](control-api.md)). Default `yes`. |
 | `SETUP_HOME_ASSISTANT`, `SETUP_CEC` | The setup then names the guides at the end |
 
 The setup writes `/etc/x86-linux-htpc/htpc.conf`. At the end, it runs the checks of all components and shows the next steps. On the first run, some checks fail, because the Jellyfin login and the first session of the TV user do not exist yet. Then `setup.sh` ends with the exit code 1. The next steps fix these checks. The key `COMPONENTS` in this file lists the components that the answers need. `htpc.conf.example` explains each key.
@@ -72,4 +73,4 @@ Run `sudo ./setup.sh` again, or change `/etc/x86-linux-htpc/htpc.conf` and run `
 
 ## Home Assistant and CEC
 
-The setup installs nothing for these two. [home-assistant.md](home-assistant.md) shows how Home Assistant turns the TV on, starts a video and turns the TV off. [cec.md](cec.md) describes the design for a USB-CEC adapter, which has no component yet.
+The setup installs nothing on the Home Assistant server. The component `control-api` gives Home Assistant a media player entity and a REST API on the HTPC. [home-assistant.md](home-assistant.md) shows how Home Assistant turns the TV on, starts a video and turns the TV off. [cec.md](cec.md) describes the design for a USB-CEC adapter, which has no component yet.

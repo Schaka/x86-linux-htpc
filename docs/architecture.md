@@ -12,6 +12,7 @@ This page describes the parts of the HTPC and how they work together. [status.md
 | Players | `jellyfin-mpv-shim` with mpv, and Kodi with the CB1 engine | Play the video and the audio |
 | Apps | Waydroid (Android in a container) | Runs the Android TV apps for YouTube and Twitch |
 | Control | A USB-CEC adapter with libcec | Turns the TV and the receiver on and off, and reads the keys of the TV remote |
+| Remote control | `htpc-control`, a REST API and DLNA renderer ([control-api.md](control-api.md)) | Lets Home Assistant and phones start media on the HTPC and control it |
 | Install | Shell scripts in this repository | Install and check each part |
 
 ## Who owns the screen

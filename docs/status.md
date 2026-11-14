@@ -1,6 +1,6 @@
 # Status
 
-This page lists the features of version 1.0-beta. [hardware.md](hardware.md) lists the hardware that the features work on.
+This page lists the features of version 1.0.0-beta1. [hardware.md](hardware.md) lists the hardware that the features work on.
 
 ## Features
 
@@ -20,6 +20,8 @@ This page lists the features of version 1.0-beta. [hardware.md](hardware.md) lis
 | Air mouse: OK as a click or as Enter, Back as Back | Works | |
 | Wake-on-LAN of the TV at login and at each video | Works | The TV must support a network wake from standby |
 | `setup.sh` on a fresh Fedora KDE install | Works | |
+| REST API with an OpenAPI document, to start YouTube videos, Jellyfin items, media addresses and apps, and to control the player that plays | Works | [control-api.md](control-api.md). The Android apps start, but report no state. |
+| DLNA renderer for Home Assistant and DLNA apps | Works | No volume, no queue |
 | Home Assistant | Guide | [home-assistant.md](home-assistant.md) |
 | HDMI-CEC | Planned | [cec.md](cec.md) has the design |
 

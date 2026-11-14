@@ -95,7 +95,8 @@ build_ffmpeg() {
 	info "Building FFmpeg ${version}"
 	# The configure options follow packages/multimedia/ffmpeg/package.mk of
 	# LibreELEC. The encoders and the programs stay off, because players
-	# need only the decoders, the demuxers and the filters.
+	# need only the decoders, the demuxers and the filters. GnuTLS gives the
+	# protocol https, for media addresses from DLNA apps and Home Assistant.
 	(
 		cd "${source}"
 		./configure \
@@ -107,7 +108,7 @@ build_ffmpeg() {
 			--disable-encoders --enable-encoder=ac3,eac3,aac,mjpeg,png \
 			--disable-muxers --enable-muxer=spdif,adts,mpegts \
 			--disable-devices \
-			--enable-vaapi --enable-libdrm --enable-libdav1d \
+			--enable-vaapi --enable-libdrm --enable-libdav1d --enable-gnutls \
 			--disable-vdpau \
 			--enable-runtime-cpudetect \
 			--enable-pic

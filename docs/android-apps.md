@@ -35,7 +35,7 @@ On Fedora, SELinux runs in enforcing mode. The policy of `waydroid-selinux` runs
 
 | Topic | Behavior |
 |---|---|
-| Window | Waydroid shows the full Android interface full screen. Each app also has its own launcher entry in Plasma Bigscreen. |
+| Window | Waydroid shows the full Android interface full screen. Each app also has its own launcher entry in Plasma Bigscreen. If the window of Waydroid is minimized, for example after `home` of the control API, the launcher restores it. |
 | Video decode | The app decodes the video through the codecs of Android. The images of WayDroid-ATV contain the Intel media driver and decode video through VA-API on Intel and AMD GPUs. The standard LineageOS image of Waydroid decodes in software. The Android TV image turns on zero-copy decoding on Intel GPUs at each start (`debug.ffmpeg-codec2.hwaccel.drm=1`). The decoder then takes about 12 % of one CPU core for 4K VP9. With the direct scanout of KWin, these frames show shifted and black parts on the TV, and the Android interface flickers. So the component `bigscreen` turns direct scanout off. [desktop.md](desktop.md) describes the setting. Software decode of 4K VP9 or AV1 is too slow for an N100 class CPU. With the hardware decoder, SmartTube plays 4K VP9 at 60 fps on an N100 class GPU. |
 | HDR | Waydroid sends no HDR to the host. Android reports a display without HDR types and without wide color, so YouTube sends SDR video. The apps play SDR, also when Plasma is in HDR mode. |
 | Sound | Waydroid plays PCM through PipeWire. Passthrough is not possible. |

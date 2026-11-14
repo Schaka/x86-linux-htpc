@@ -1,0 +1,27 @@
+[package]
+name = "htpc-control"
+version = "1.0.0-beta1"
+edition = "2024"
+license = "AGPL-3.0-only"
+description = "REST API and DLNA renderer that start and control the players of the HTPC"
+publish = false
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+socket2 = { version = "0.5", features = ["all"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "time", "signal", "sync", "io-util", "fs"] }
+tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "handshake"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi"] }
+utoipa = { version = "5", features = ["axum_extras", "yaml"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = "s"

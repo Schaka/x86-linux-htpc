@@ -37,6 +37,7 @@ Ask in small groups. Give the detected default and a recommendation with each qu
 | Remote | `SETUP_REMOTE`, `AIR_MOUSE_USB_IDS` | Ask which remote the user has. For an air mouse, show the detected USB IDs and the names from `/sys/bus/usb/devices/*/product`, and let the user pick the receiver. |
 | Comfort | `SCREEN_EDGES` | Recommend `off`. A pointer in a screen corner then does not open the overview of KWin. |
 | TV power | `WAKE_ON_LAN_MACS` | Ask for the MAC addresses of the TV, cable and Wi-Fi. If the user knows only the IP address of the TV, ping it and read `ip neigh show IP`. Remind the user to turn on the network wake option of the TV. |
+| Remote control | `SETUP_CONTROL` | The control API lets Home Assistant and phones start media on the HTPC. It has no authentication and is for the local network. Recommend `yes`. |
 | Extras | `SETUP_HOME_ASSISTANT`, `SETUP_CEC` | See the last section. |
 
 ## 3. Run the setup

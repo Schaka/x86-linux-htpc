@@ -111,6 +111,25 @@ CB1_BUILD_DIR=/var/tmp/htpc-cb1
 # The VT of Kodi. The CB1 mpv of jellyfin-mpv-shim uses VT 8.
 KODI_VT=9
 
+# The control API of the component control-api: the TCP port for the REST
+# API and for the descriptions of the DLNA renderer. docs/control-api.md
+# lists the paths. The API is for the local network and has no
+# authentication, as DLNA. Do not forward the port to the internet.
+CONTROL_API_PORT=8780
+
+# The DLNA renderer of the control API: yes or no. Home Assistant and the
+# DLNA apps of phones find the HTPC through it.
+CONTROL_DLNA=yes
+
+# The name of the HTPC in Home Assistant and in the DLNA apps. Empty: the
+# value of JELLYFIN_PLAYER_NAME, or else the host name.
+CONTROL_NAME=
+
+# The folder of control/build.sh. If it has the program htpc-control, the
+# component control-api installs it. Otherwise the component downloads the
+# program of the newest release.
+CONTROL_BUILD_DIR=/var/tmp/htpc-control
+
 # The folder with the kernel packages of kernel/build-fedora.sh, for the
 # component kernel-dv. The file names contain ".htpc.".
 KERNEL_PACKAGES_DIR=/var/tmp/htpc-kernel

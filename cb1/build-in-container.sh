@@ -30,7 +30,7 @@ fail() {
 build_packages=(
 	gcc gcc-c++ make cmake meson ninja-build nasm pkgconf-pkg-config
 	patch curl git-core xz python3 python3-pyyaml
-	libva-devel libdrm-devel libdav1d-devel
+	libva-devel libdrm-devel libdav1d-devel gnutls-devel
 	mesa-libEGL-devel mesa-libGLES-devel mesa-libgbm-devel
 	zlib-devel bzip2-devel
 	libass-devel pipewire-devel alsa-lib-devel luajit-devel
