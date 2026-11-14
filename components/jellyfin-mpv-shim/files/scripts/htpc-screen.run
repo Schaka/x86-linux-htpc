@@ -19,6 +19,7 @@
 import json
 import os
 import select
+import signal
 import socket
 import struct
 import subprocess
@@ -192,7 +193,9 @@ class Screen:
 
     def release(self):
         self.release_at = None
-        previous = self.previous_vt or plasma_vt()
+        previous = self.previous_vt
+        if not previous or previous == self.vt:
+            previous = plasma_vt()
         self.log(f"Release: previous VT {previous}, active VT {active_vt()}, own VT {self.vt}")
         if previous and active_vt() == self.vt:
             self.switch_to(previous)
@@ -338,6 +341,20 @@ class Screen:
             time.sleep(0.05)
 
     def run(self):
+        try:
+            self.serve()
+        except Terminated:
+            pass
+        # mpv ended, also after a crash. Plasma gets the screen back. A
+        # second SIGTERM must not stop the switch.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            self.wait_for_mpv_exit()
+        except Terminated:
+            pass
+        self.release()
+
+    def serve(self):
         self.send("get_property", "pid", request_id=1)
         self.send("get_property", "drm-vt", request_id=2)
         for number, name in enumerate(self.state, start=1):
@@ -362,12 +379,21 @@ class Screen:
                 self.release()
             if self.pointer_hide_at is not None and time.monotonic() >= self.pointer_hide_at:
                 self.hide_pointer()
-        # mpv ended, also after a crash. Plasma gets the screen back.
-        self.wait_for_mpv_exit()
-        self.release()
+
+
+class Terminated(Exception):
+    pass
+
+
+def terminate(_signum, _frame):
+    raise Terminated()
 
 
 def main():
+    # When mpv is the main process of a systemd service, systemd sends
+    # SIGTERM to this script as soon as mpv ends. The script then still
+    # gives the screen back to Plasma.
+    signal.signal(signal.SIGTERM, terminate)
     fd_option = next((arg for arg in sys.argv[1:] if arg.startswith("--mpv-ipc-fd=")), None)
     if fd_option is None:
         sys.exit("htpc-screen.run runs only as an mpv script.")

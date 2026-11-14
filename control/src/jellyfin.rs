@@ -18,10 +18,13 @@ use crate::status::{PlayState, Running, Source, Status};
 
 const TICKS_PER_SECOND: f64 = 10_000_000.0;
 const SHIM_DIR: &str = ".config/jellyfin-mpv-shim";
+/// The login of the add-on "Jellyfin for Kodi"
+const KODI_ADDON_DATA: &str = ".kodi/userdata/addon_data/plugin.video.jellyfin/data.json";
 
 pub struct Jellyfin {
     http: reqwest::Client,
     shim_dir: PathBuf,
+    kodi_data: PathBuf,
 }
 
 struct Login {
@@ -50,6 +53,7 @@ impl Jellyfin {
         Jellyfin {
             http,
             shim_dir: home.join(SHIM_DIR),
+            kodi_data: home.join(KODI_ADDON_DATA),
         }
     }
 
@@ -186,11 +190,45 @@ impl Jellyfin {
     }
 
     /// The resume position of the item for the user of the shim
+    /// The resume position of the item for the Jellyfin user of the shim
     pub async fn resume_position(&self, item_id: &str) -> Result<Option<f64>> {
         let login = self.login()?;
+        self.resume_position_of(&login, item_id).await
+    }
+
+    /// The resume position of the item for the Jellyfin user of the Kodi
+    /// add-on. The add-on can use another user than the shim, and it does
+    /// not resume by itself when it gets an item to play.
+    pub async fn kodi_resume_position(&self, item_id: &str) -> Result<Option<f64>> {
+        let text = std::fs::read_to_string(&self.kodi_data)
+            .map_err(|_| ApiError::offline("The Kodi add-on Jellyfin for Kodi has no login."))?;
+        let data: Value = serde_json::from_str(&text)
+            .map_err(|_| ApiError::offline("The login file of the Kodi add-on is not valid."))?;
+        let server = &data["Servers"][0];
+        let text = |key: &str| server[key].as_str().map(String::from);
+        let (Some(address), Some(token), Some(user_id)) =
+            (text("address"), text("AccessToken"), text("UserId"))
+        else {
+            return Err(ApiError::offline(
+                "The Kodi add-on Jellyfin for Kodi has no login.",
+            ));
+        };
+        let server = Url::parse(&address).map_err(|_| {
+            ApiError::offline("The Jellyfin address of the Kodi add-on is not valid.")
+        })?;
+        let login = Login {
+            server,
+            token,
+            user_id,
+            device_id: String::new(),
+        };
+        self.resume_position_of(&login, item_id).await
+    }
+
+    async fn resume_position_of(&self, login: &Login, item_id: &str) -> Result<Option<f64>> {
         let path = format!("/Users/{}/Items/{}", login.user_id, item_id);
         let response = self
-            .request(&login, reqwest::Method::GET, &path)
+            .request(login, reqwest::Method::GET, &path)
             .send()
             .await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND

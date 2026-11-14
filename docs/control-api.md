@@ -68,7 +68,7 @@ curl http://HTPC:8780/api/v1/status
 | `shim` (default) | `jellyfin-mpv-shim` |
 | `kodi` | Kodi with the add-on "Jellyfin for Kodi". If Kodi does not run, the service starts it first. |
 
-Without `start`, the item starts at the resume position of the Jellyfin user of the shim, in both players. `"resume": false` starts at the beginning. The Kodi add-on uses its own login, so log it in with the same Jellyfin user.
+Without `start`, the item starts at the resume position of the Jellyfin user of the player. The shim and the Kodi add-on each have their own login, and they can use different Jellyfin users. The service reads the login of the add-on from its `data.json`, because the add-on does not resume by itself. `"resume": false` starts at the beginning.
 
 The shim has no local API. It is a session on the Jellyfin server, and the server sends it the play commands. The service uses the login of the shim from `~/.config/jellyfin-mpv-shim/users.json`, so it needs no API key. Its requests use the token of the shim, so the server counts them as the shim and shows no second session.
 
@@ -78,7 +78,7 @@ The shim has no local API. It is a session on the Jellyfin server, and the serve
 
 1. A YouTube address (`youtube.com/watch`, `youtu.be`, `/shorts/`, `/live/`) plays in VacuumTube.
 2. A stream address of the Jellyfin server of the shim (`/Videos/ID/...`, `/Items/ID/...`, `/Audio/ID/...`) plays the item in the shim. Jellyfin then keeps the watched state and the resume position.
-3. Each other address plays in mpv. mpv uses the configuration folder of the shim, so it uses the same mpv program, options and scripts. With `JELLYFIN_MPV=cb1`, this is the CB1 mpv on its own VT with Dolby Vision. The FFmpeg of the CB1 build has GnuTLS for `https://` addresses. When the mpv of the service ends, the service makes sure that the screen goes back to Plasma.
+3. Each other address plays in mpv. mpv uses the configuration folder of the shim, so it uses the same mpv program, options and scripts. With `JELLYFIN_MPV=cb1`, this is the CB1 mpv on its own VT with Dolby Vision. The FFmpeg of the CB1 build has GnuTLS for `https://` addresses. When this mpv ends, its script `htpc-screen.run` gives the screen back to Plasma, as for the shim.
 
 ### One player at a time
 

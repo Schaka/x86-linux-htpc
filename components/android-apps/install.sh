@@ -11,6 +11,7 @@ require_root
 
 component_dir="$(dirname "${BASH_SOURCE[0]}")"
 download_dir=/var/cache/x86-linux-htpc/android-apps
+icon_dir=.local/share/x86-linux-htpc/icons
 launcher=/usr/local/libexec/x86-linux-htpc/android-app
 # The name of the last installed APK of each app, so that a second run with
 # the same release changes nothing
@@ -33,10 +34,9 @@ start_session() {
 }
 
 # Waydroid makes desktop entries only for apps with a phone launcher icon.
-# TV apps have none, so the component writes an entry for each app. It uses
-# the icon that Waydroid exports for each app.
+# TV apps have none, so the component writes an entry for each app.
 install_desktop_entry() {
-	local name="$1" package="$2" title="$3" generated
+	local name="$1" package="$2" title="$3" icon="$4" generated
 	generated="$(mktemp)"
 	cat >"${generated}" <<ENTRY
 [Desktop Entry]
@@ -44,20 +44,39 @@ Type=Application
 Name=${title}
 Comment=Android app
 Exec=${launcher} ${package}
-Icon=$(htpc_user_home)/.local/share/waydroid/data/icons/${package}.png
+Icon=${icon}
 Categories=AudioVideo;Video;TV;
 ENTRY
 	install_user_file "${generated}" ".local/share/applications/htpc-android-${name}.desktop"
 	rm -f "${generated}"
 }
 
+# Waydroid exports the icon only for apps with a phone launcher, so a TV
+# app such as S0undTV has none there. The component copies the icon out of
+# the APK instead. Sets the variable icon to its path.
+install_app_icon() {
+	local package="$1" apk="$2" generated_dir extracted
+	generated_dir="$(mktemp -d)"
+	# install_user_file copies as the HTPC user, who must read the folder.
+	chmod 0755 "${generated_dir}"
+	icon="$(htpc_user_home)/.local/share/waydroid/data/icons/${package}.png"
+	if extracted="$(python3 -I "${component_dir}/files/apk-icon.py" "${apk}" "${generated_dir}/${package}")"; then
+		install_user_file "${extracted}" "${icon_dir}/$(basename "${extracted}")"
+		icon="$(htpc_user_home)/${icon_dir}/$(basename "${extracted}")"
+	else
+		warn "No icon in $(basename "${apk}"). The tile uses the icon that Waydroid exports, if any."
+	fi
+	rm -rf "${generated_dir}"
+}
+
 install_app() {
-	local name="$1" line package repository pattern title apk state
+	local name="$1" line package repository pattern title apk state icon
 	line="$(app_line "${name}")"
 	[[ -n "${line}" ]] || fail "ANDROID_APPS names ${name}, but files/apps.conf has no such app."
 	read -r _ package repository pattern title <<<"${line}"
-	install_desktop_entry "${name}" "${package}" "${title}"
 	apk="$(python3 -I "${component_dir}/files/fetch-apk.py" "${repository}" "${pattern}" "${download_dir}")"
+	install_app_icon "${package}" "${apk}"
+	install_desktop_entry "${name}" "${package}" "${title}" "${icon}"
 	state="$(htpc_user_home)/${state_dir}/${name}"
 	if [[ "$(cat "${state}" 2>/dev/null)" == "$(basename "${apk}")" ]] &&
 		lxc-attach -P /var/lib/waydroid/lxc -n waydroid --clear-env -- /system/bin/pm path "${package}" >/dev/null 2>&1; then
@@ -108,6 +127,7 @@ remove_unlisted_apps() {
 			android /system/bin/pm uninstall "${package}" >/dev/null 2>&1 || true
 		fi
 		rm -f "$(htpc_user_home)/.local/share/applications/htpc-android-${name}.desktop" "${state}"
+		[[ -n "${package}" ]] && rm -f "$(htpc_user_home)/${icon_dir}/${package}".*
 		info "Removed ${name}, because ANDROID_APPS does not list it"
 	done
 }

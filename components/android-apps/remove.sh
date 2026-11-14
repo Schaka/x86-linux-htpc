@@ -11,5 +11,6 @@ require_root
 
 rm -rf "$(htpc_user_home)/.local/state/x86-linux-htpc/android-apps" /var/cache/x86-linux-htpc/android-apps
 rm -f "$(htpc_user_home)"/.local/share/applications/htpc-android-*.desktop
+rm -rf "$(htpc_user_home)/.local/share/x86-linux-htpc/icons"
 remove_file /usr/local/libexec/x86-linux-htpc/android-app
 info "Removed the downloads and the version records of the Android apps"

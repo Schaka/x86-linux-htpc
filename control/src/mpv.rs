@@ -13,7 +13,6 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use tokio::process::Command;
 
 use crate::apps::run_detached;
 use crate::config::Config;
@@ -22,8 +21,6 @@ use crate::status::{PlayState, Running, Source, Status};
 
 const CB1_MPV: &str = "/opt/x86-linux-htpc/cb1/bin/mpv";
 const TIMEOUT: Duration = Duration::from_secs(2);
-/// The VT of the CB1 mpv, as in the component jellyfin-mpv-shim
-const CB1_VT: &str = "tty8";
 
 pub struct Mpv {
     socket: PathBuf,
@@ -106,11 +103,7 @@ impl Mpv {
             argv.push(format!("--force-media-title={title}"));
         }
         argv.extend(["--".into(), url.into()]);
-        let unit = run_detached("htpc-control-mpv", &argv).await?;
-        if self.program == CB1_MPV {
-            tokio::spawn(give_screen_back_after(unit));
-        }
-        Ok(())
+        run_detached("htpc-control-mpv", &argv).await.map(|_| ())
     }
 
     pub async fn status(&self) -> Option<Status> {
@@ -165,82 +158,4 @@ impl Mpv {
     pub async fn quit(&self) -> Result<()> {
         self.command(json!(["quit"])).await.map(|_| ())
     }
-}
-
-/// The script htpc-screen.run of the CB1 mpv switches back to Plasma when
-/// mpv ends. If mpv ends within a second of its start, for example at an
-/// address that it cannot open, the script does not get to run, and the
-/// screen stays on the empty VT of mpv. So after the end of the mpv of this
-/// service, and when no other CB1 mpv runs, the service switches back.
-async fn give_screen_back_after(unit: String) {
-    loop {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let active = Command::new("systemctl")
-            .args(["--user", "is-active", "--quiet", &unit])
-            .status()
-            .await;
-        if !matches!(active, Ok(status) if status.success()) {
-            break;
-        }
-    }
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let front = std::fs::read_to_string("/sys/class/tty/tty0/active").unwrap_or_default();
-    let other_mpv = Command::new("pgrep")
-        .args(["-u", &uid(), "-f", CB1_MPV])
-        .status()
-        .await
-        .is_ok_and(|s| s.success());
-    if front.trim() != CB1_VT || other_mpv {
-        return;
-    }
-    let Some(vt) = plasma_vt().await else { return };
-    tracing::info!("mpv ended on its VT, switching back to VT {vt}");
-    let _ = Command::new("busctl")
-        .args([
-            "call",
-            "org.freedesktop.login1",
-            "/org/freedesktop/login1/seat/seat0",
-            "org.freedesktop.login1.Seat",
-            "SwitchTo",
-            "u",
-            &vt,
-        ])
-        .status()
-        .await;
-}
-
-/// The user ID of this process, from the owner of /proc/self
-fn uid() -> String {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::metadata("/proc/self")
-        .map(|m| m.uid().to_string())
-        .unwrap_or_default()
-}
-
-/// The VT of the graphical session of this user
-async fn plasma_vt() -> Option<String> {
-    let value = |args: Vec<String>| async move {
-        let output = Command::new("loginctl")
-            .args(args)
-            .arg("--value")
-            .output()
-            .await
-            .ok()?;
-        Some(String::from_utf8_lossy(&output.stdout).trim().to_string()).filter(|v| !v.is_empty())
-    };
-    let session = value(vec![
-        "show-user".into(),
-        uid(),
-        "-p".into(),
-        "Display".into(),
-    ])
-    .await?;
-    value(vec![
-        "show-session".into(),
-        session,
-        "-p".into(),
-        "VTNr".into(),
-    ])
-    .await
-    .filter(|vt| vt.chars().all(|c| c.is_ascii_digit()))
 }

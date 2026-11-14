@@ -163,7 +163,7 @@ pub struct JellyfinRequest {
     item_id: String,
     /// The start in seconds. Without it, resume decides.
     start: Option<f64>,
-    /// Without start: start at the resume position of the Jellyfin user of the shim.
+    /// Without start: start at the resume position of the Jellyfin user of the player.
     #[serde(default = "yes")]
     #[schema(default = true)]
     resume: bool,

@@ -177,10 +177,11 @@ impl Controller {
             )));
         }
         let _guard = self.starting.lock().await;
-        let start = match start {
-            Some(start) => Some(start),
-            None if resume => self.jellyfin.resume_position(item_id).await?,
-            None => None,
+        let start = match (start, player) {
+            (Some(start), _) => Some(start),
+            (None, _) if !resume => None,
+            (None, JellyfinPlayer::Shim) => self.jellyfin.resume_position(item_id).await?,
+            (None, JellyfinPlayer::Kodi) => self.jellyfin.kodi_resume_position(item_id).await?,
         };
         match player {
             JellyfinPlayer::Shim => {
@@ -190,9 +191,9 @@ impl Controller {
             JellyfinPlayer::Kodi => {
                 self.make_room(Source::Kodi).await?;
                 self.start_kodi().await?;
-                // The add-on and the shim log in to the same Jellyfin server.
                 // The add-on starts at the position of the parameter
-                // timestamp, in seconds.
+                // timestamp, in seconds. Without it, the add-on starts at
+                // the beginning.
                 let mut file = format!(
                     "plugin://plugin.video.jellyfin/?mode=play&id={}",
                     item_id.replace('-', "")

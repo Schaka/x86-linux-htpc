@@ -46,7 +46,7 @@ Shows that the service runs, and its version.
 ```json
 {
   "status": "ok",
-  "version": "1.0.0-beta2"
+  "version": "1.0.0-beta3"
 }
 ```
 
@@ -123,7 +123,7 @@ Plays a movie, an episode or a song of the Jellyfin server of jellyfin-mpv-shim.
 | `item_id` | string | | The Jellyfin item ID. The address of the item page in the Jellyfin web client contains it. |
 | `player` | string | `shim` | `shim` for jellyfin-mpv-shim, `kodi` for Kodi with the add-on "Jellyfin for Kodi". If Kodi does not run, the service starts it. |
 | `start` | number | | The start in seconds |
-| `resume` | boolean | `true` | Without `start`: `true` starts at the resume position of the Jellyfin user of the shim, `false` at the beginning |
+| `resume` | boolean | `true` | Without `start`: `true` starts at the resume position of the Jellyfin user of the player, `false` at the beginning. The shim and the Kodi add-on each have their own login. |
 
 ```bash
 curl -X POST http://HTPC:8780/api/v1/play/jellyfin \

@@ -14,6 +14,13 @@ entry_present() {
 	[[ -f "$(htpc_user_home)/.local/share/applications/htpc-android-$1.desktop" ]]
 }
 
+# The icon file that the desktop entry names exists.
+entry_icon_present() {
+	local icon
+	icon="$(sed -n 's/^Icon=//p' "$(htpc_user_home)/.local/share/applications/htpc-android-$1.desktop" 2>/dev/null)"
+	[[ -n "${icon}" && -s "${icon}" ]]
+}
+
 # The settings file of the app has the proxy URL as XML text, so "&"
 # appears as "&amp;".
 s0undtv_proxy_set() {
@@ -26,6 +33,7 @@ s0undtv_proxy_set() {
 for name in $(config_get ANDROID_APPS); do
 	check "The Android app ${name} is installed" app_installed "${name}"
 	check "The Android app ${name} has a desktop entry" entry_present "${name}"
+	check "The tile of the Android app ${name} has an icon" entry_icon_present "${name}"
 	if [[ "${name}" == s0undtv && -n "$(config_get TWITCH_PROXY_URL)" ]]; then
 		check "S0undTV loads Twitch streams through TWITCH_PROXY_URL" s0undtv_proxy_set
 	fi
