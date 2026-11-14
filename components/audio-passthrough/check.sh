@@ -30,6 +30,11 @@ network_speakers_off() {
 	! run_as_htpc_user pw-dump 2>/dev/null | grep -q '"node.name": "raop_sink\.'
 }
 
+# The value that WirePlumber uses, from all its configuration files
+players_keep_playing() {
+	run_as_htpc_user wpctl settings linking.pause-playback 2>/dev/null | grep -qx 'Value: false'
+}
+
 if ! run_as_htpc_user systemctl --user is-active --quiet pipewire.service 2>/dev/null; then
 	warn "PipeWire of the HTPC user does not run, so the checks of the HDMI sink are skipped."
 	checks_done
@@ -48,6 +53,7 @@ if [[ -z "${properties}" ]]; then
 fi
 check_pass "PipeWire has an HDMI sink: $(sed -n 's/^node.name=//p' <<<"${properties}")"
 check "PipeWire has no AirPlay speakers as sinks" network_speakers_off
+check "WirePlumber keeps the players playing when the HDMI output is lost for a moment" players_keep_playing
 
 codecs=" $(sed -n 's/^iec958.codecs=//p' <<<"${properties}") "
 for format in $(config_get AUDIO_PASSTHROUGH_FORMATS "ac3 eac3 truehd dts dts-hd"); do

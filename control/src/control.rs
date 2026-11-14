@@ -33,8 +33,6 @@ const KODI_EXIT_TIMEOUT: Duration = Duration::from_secs(15);
 const KODI_HANDOVER: Duration = Duration::from_secs(4);
 /// The CB1 mpv gives the screen back to Plasma one second after a stop.
 const SCREEN_HANDOVER: Duration = Duration::from_secs(2);
-/// See unpause_after_wake
-const WAKE_RESUME_WINDOW: Duration = Duration::from_secs(30);
 
 /// The player of a Jellyfin item
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
@@ -188,7 +186,6 @@ impl Controller {
             JellyfinPlayer::Shim => {
                 self.make_room(Source::Jellyfin).await?;
                 self.jellyfin.play(item_id, start).await?;
-                tokio::spawn(unpause_after_wake(self.jellyfin.clone()));
             }
             JellyfinPlayer::Kodi => {
                 self.make_room(Source::Kodi).await?;
@@ -429,24 +426,6 @@ async fn minimize_windows() {
     }
     busctl(unload).await;
     let _ = std::fs::remove_file(path);
-}
-
-/// The start of a video wakes the TV (component network-wake). The AV
-/// receiver then syncs the HDMI signal again, maybe more than once, and the
-/// HDMI audio device goes away for a moment each time. mpv then pauses. So
-/// for a short time after a start, the service continues a paused video. A
-/// pause by the user in this time also ends.
-async fn unpause_after_wake(jellyfin: Arc<Jellyfin>) {
-    let deadline = tokio::time::Instant::now() + WAKE_RESUME_WINDOW;
-    while tokio::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        if let Ok(Some(status)) = jellyfin.status().await
-            && status.state == PlayState::Paused
-        {
-            tracing::info!("the video paused after the TV wake, continuing it");
-            let _ = jellyfin.command("Unpause").await;
-        }
-    }
 }
 
 fn log_none<T>(error: ApiError) -> Option<T> {

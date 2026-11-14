@@ -35,6 +35,13 @@ monitor.alsa.rules = [
 # The AV receiver sets the volume. PipeWire sends the full level, because
 # its default of 40 % makes decoded sound very quiet. A volume that the
 # user sets later is stored and wins over this default.
+#
+# WirePlumber pauses a media player when its output goes away. The HDMI
+# output goes away for a moment each time the TV or the AV receiver turns
+# on or syncs the signal again, for example when a cast wakes the TV. The
+# player would then stay paused at the start of the video. So the players
+# keep playing, and PipeWire moves them to the HDMI output when it is back.
 wireplumber.settings = {
   device.routes.default-sink-volume = 1.0
+  linking.pause-playback = false
 }

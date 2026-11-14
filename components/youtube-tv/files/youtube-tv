@@ -47,11 +47,6 @@ TV_RATES = (24000 / 1001, 24, 25, 30000 / 1001, 30, 50, 60000 / 1001, 60)
 MEASURE_TIMEOUT = 15.0
 # The time that the TV and the AV receiver need to sync to a new mode.
 SYNC_WAIT = 3.0
-# A TV that wakes up for a video makes the AV receiver sync the HDMI
-# signal again. The HDMI audio device goes away for a moment, and YouTube
-# pauses the video. The launcher starts a video again that pauses within
-# this time after the wake. A pause by the user in this time also ends.
-WAKE_RESUME_WINDOW = 20.0
 # The sender of the component network-wake. A cast from the YouTube app of
 # a phone starts a video in VacuumTube, and the packet turns on a TV in
 # standby. Without the component, the file does not exist.
@@ -66,7 +61,6 @@ PLAYER_JS = """(() => [document.getElementById("movie_player"),
                       document.querySelector(".html5-video-player")]
                      .find(e => e && e.getStatsForNerds))()"""
 PAUSE_JS = f"(() => {{ const p = {PLAYER_JS}; if (p) p.pauseVideo(); }})()"
-PLAY_JS = f"(() => {{ const p = {PLAYER_JS}; if (p) p.playVideo(); }})()"
 RESUME_JS = f"""(() => {{
   const p = {PLAYER_JS};
   if (!p) return;
@@ -114,7 +108,7 @@ PLAYER_STATE_JS = """(() => {
     video.requestVideoFrameCallback(onFrame);
   }
   return {resolution: stats.resolution || "", color: stats.color || "",
-          ended: video.ended, started: video.currentTime > 0, paused: video.paused,
+          ended: video.ended, started: video.currentTime > 0,
           measured: video.htpcMeasure ? video.htpcMeasure.fps : null};
 })()"""
 
@@ -305,17 +299,13 @@ def main():
     display.apply(None, True)
     menu_since = None
     video_since = None
-    woke_at = 0.0
     try:
         while app.poll() is None:
             state = devtools.evaluate(PLAYER_STATE_JS)
             if state and state.get("started") and not state.get("ended"):
                 if not video_since:
                     wake_tv()
-                    woke_at = time.monotonic()
                 video_since = video_since or time.monotonic()
-                if state.get("paused") and time.monotonic() - woke_at < WAKE_RESUME_WINDOW:
-                    devtools.evaluate(PLAY_JS)
             else:
                 video_since = None
             playing = video_format(state, time.monotonic() - (video_since or time.monotonic()))

@@ -43,6 +43,7 @@ The component `audio-passthrough` writes a WirePlumber drop-in for the HTPC user
 | `iec958.codecs` | The formats of `AUDIO_PASSTHROUGH_FORMATS` in `/etc/x86-linux-htpc/htpc.conf`, plus PCM |
 | `session.suspend-timeout-seconds` | 0, if `AUDIO_KEEP_HDMI_OPEN=yes`. A receiver needs about a second to lock on to a new stream, and an open device loses no start of a sound. |
 | `device.routes.default-sink-volume` | 1.0. The receiver sets the volume, and the default of WirePlumber (40 %) makes decoded sound very quiet. At the first install with this value, the component also sets each HDMI output to the full level. A volume that the user sets later is stored and wins. |
+| `linking.pause-playback` | `false`. With the default `true`, WirePlumber pauses a media player at the loss of its output. The HDMI output is lost for a moment at each power-on of the TV or the AV receiver. A cast that wakes the TV is an example. A start from standby then stays paused at its first frame. |
 
 On Fedora, the component also removes the package `pipewire-config-raop`. With it, PipeWire adds each AirPlay speaker of the LAN as a sink. When the TV turns on or off, the receiver sends a hotplug, and the HDMI sink is gone for a moment. PipeWire then moves the stream of the player to an AirPlay speaker, and the stream stays there. The component `remove.sh` does not install the package again.
 

@@ -84,8 +84,6 @@ The shim has no local API. It is a session on the Jellyfin server, and the serve
 
 Kodi and the CB1 mpv each take the whole screen on their own VT. So a start first stops the media of the other players. It ends Kodi, unless Kodi plays next, and it pauses VacuumTube. The Android apps of Waydroid keep running in the background.
 
-A start also wakes the TV (component `network-wake`). The AV receiver then syncs the HDMI signal again, and the HDMI audio device goes away for a moment. mpv and YouTube pause at this loss. So for 30 seconds after the start of a Jellyfin item, the service continues a paused video. The YouTube launcher does the same for 20 seconds.
-
 ## DLNA renderer
 
 The renderer is a UPnP AV media renderer (DLNA DMR). It announces itself with SSDP on the local network. The Home Assistant integration "DLNA Digital Media Renderer" finds it and makes a media player entity.
