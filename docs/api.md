@@ -46,7 +46,7 @@ Shows that the service runs, and its version.
 ```json
 {
   "status": "ok",
-  "version": "1.0.0-beta1"
+  "version": "1.0.0-beta2"
 }
 ```
 
