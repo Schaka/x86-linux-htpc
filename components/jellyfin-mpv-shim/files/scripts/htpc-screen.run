@@ -33,6 +33,10 @@ RELEASE_DELAY = 1.0
 # mpv holds the DRM master until its process ends. Plasma gets the master
 # back only after that.
 EXIT_WAIT = 5.0
+# KWin takes the screen back a moment after the switch to its VT. Before
+# that, Plasma ignores the shortcut of the home screen.
+SWITCH_TIMEOUT = 5.0
+HOME_WAIT = 2.0
 DEVICE_SCAN_INTERVAL = 2.0
 
 EVENT_FORMAT = "llHHi"
@@ -173,8 +177,17 @@ class Screen:
             capture_output=True, text=True, timeout=10)
         if result.returncode != 0:
             self.log(f"Cannot switch to VT {vt}: {result.stderr.strip()}")
-        else:
-            self.log(f"Switched to VT {vt}")
+            return False
+        self.log(f"Switched to VT {vt}")
+        return True
+
+    def show_home_when_plasma_is_back(self, vt):
+        deadline = time.monotonic() + SWITCH_TIMEOUT
+        while active_vt() != vt and time.monotonic() < deadline:
+            time.sleep(0.1)
+        time.sleep(HOME_WAIT)
+        show_bigscreen_home()
+        self.log("Showed the Bigscreen home screen")
 
     def needs_screen(self):
         return (self.state["force-window"] or not self.state["idle-active"]
@@ -197,9 +210,8 @@ class Screen:
         if not previous or previous == self.vt:
             previous = plasma_vt()
         self.log(f"Release: previous VT {previous}, active VT {active_vt()}, own VT {self.vt}")
-        if previous and active_vt() == self.vt:
-            self.switch_to(previous)
-            show_bigscreen_home()
+        if previous and active_vt() == self.vt and self.switch_to(previous):
+            self.show_home_when_plasma_is_back(previous)
 
     def handle_message(self, message):
         if message.get("event") == "property-change" and message.get("name") in self.state:
