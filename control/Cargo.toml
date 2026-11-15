@@ -1,6 +1,6 @@
 [package]
 name = "htpc-control"
-version = "1.0.0-beta4"
+version = "1.0.0-beta5"
 edition = "2024"
 license = "AGPL-3.0-only"
 description = "REST API and DLNA renderer that start and control the players of the HTPC"
