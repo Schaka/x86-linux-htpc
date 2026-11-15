@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -15,8 +15,12 @@ use utoipa::{OpenApi, ToSchema};
 
 use crate::apps::{self, App};
 use crate::control::{Controller, JellyfinPlayer};
-use crate::error::{ApiError, ErrorBody, Result};
+use crate::error::{Error, ErrorKind};
+use crate::players::youtube;
 use crate::status::{PlayState, Running, Source, Status};
+
+type Result<T> = std::result::Result<T, Error>;
+type SharedController = State<Arc<Controller>>;
 
 #[derive(OpenApi)]
 #[openapi(
@@ -66,6 +70,39 @@ pub fn router(controller: Arc<Controller>) -> Router {
         .with_state(controller)
 }
 
+/// The answer of the API to a failed request
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ErrorBody {
+    /// A fixed code for scripts, for example not_installed
+    pub error: String,
+    /// A sentence for a person
+    pub message: String,
+}
+
+fn status_code(kind: ErrorKind) -> StatusCode {
+    match kind {
+        ErrorKind::BadRequest => StatusCode::BAD_REQUEST,
+        ErrorKind::NotFound => StatusCode::NOT_FOUND,
+        ErrorKind::NotInstalled | ErrorKind::Offline => StatusCode::SERVICE_UNAVAILABLE,
+        ErrorKind::NothingPlays => StatusCode::CONFLICT,
+        ErrorKind::Player => StatusCode::BAD_GATEWAY,
+    }
+}
+
+impl IntoResponse for Error {
+    fn into_response(self) -> Response {
+        let body = ErrorBody {
+            error: self.kind.code().to_string(),
+            message: self.message,
+        };
+        (status_code(self.kind), Json(body)).into_response()
+    }
+}
+
+fn accepted(source: Source) -> (StatusCode, Json<Started>) {
+    (StatusCode::ACCEPTED, Json(Started { source }))
+}
+
 async fn openapi_json() -> impl IntoResponse {
     Json(ApiDoc::openapi())
 }
@@ -91,15 +128,15 @@ async fn health() -> Json<Health> {
 /// the players every 2 seconds.
 #[utoipa::path(get, path = "/api/v1/status", tag = "status",
     responses((status = 200, body = Status)))]
-async fn status(State(c): State<Arc<Controller>>) -> Json<Status> {
-    Json(c.status())
+async fn status(State(controller): SharedController) -> Json<Status> {
+    Json(controller.status())
 }
 
 /// The apps of the home screen
 #[utoipa::path(get, path = "/api/v1/apps", tag = "apps",
     responses((status = 200, body = Vec<App>)))]
-async fn list_apps(State(c): State<Arc<Controller>>) -> Json<Vec<App>> {
-    Json(apps::list(&c.config))
+async fn list_apps(State(controller): SharedController) -> Json<Vec<App>> {
+    Json(apps::list(&controller.config))
 }
 
 /// Starts an app of the home screen, by its id or its desktop ID. The
@@ -107,8 +144,11 @@ async fn list_apps(State(c): State<Arc<Controller>>) -> Json<Vec<App>> {
 #[utoipa::path(post, path = "/api/v1/apps/{id}/launch", tag = "apps",
     params(("id" = String, Path, description = "The id of the app, for example youtube, kodi, jellyfin or s0undtv")),
     responses((status = 200, body = App), (status = 404, body = ErrorBody), (status = 503, body = ErrorBody)))]
-async fn launch_app(State(c): State<Arc<Controller>>, Path(id): Path<String>) -> Result<Json<App>> {
-    c.launch_app(&id).await.map(Json)
+async fn launch_app(
+    State(controller): SharedController,
+    Path(id): Path<String>,
+) -> Result<Json<App>> {
+    controller.launch_app(&id).await.map(Json)
 }
 
 /// The player that the request started
@@ -131,29 +171,22 @@ pub struct YoutubeRequest {
 #[utoipa::path(post, path = "/api/v1/play/youtube", tag = "play", request_body = YoutubeRequest,
     responses((status = 202, body = Started), (status = 400, body = ErrorBody), (status = 503, body = ErrorBody)))]
 async fn play_youtube(
-    State(c): State<Arc<Controller>>,
-    Json(r): Json<YoutubeRequest>,
+    State(controller): SharedController,
+    Json(request): Json<YoutubeRequest>,
 ) -> Result<(StatusCode, Json<Started>)> {
-    let video_id = match (r.video_id, r.url) {
+    let video_id = match (request.video_id, request.url) {
         (Some(id), _) => id,
         (None, Some(url)) => reqwest::Url::parse(&url)
             .ok()
-            .and_then(|u| crate::youtube::video_id_from_url(&u))
-            .ok_or_else(|| {
-                ApiError::bad_request(format!("{url} is not a YouTube video address."))
-            })?,
-        (None, None) => return Err(ApiError::bad_request("Give video_id or url.")),
+            .and_then(|url| youtube::video_id_from_url(&url))
+            .ok_or_else(|| Error::bad_request(format!("{url} is not a YouTube video address.")))?,
+        (None, None) => return Err(Error::bad_request("Give video_id or url.")),
     };
-    c.play_youtube(&video_id, r.start).await?;
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(Started {
-            source: Source::Youtube,
-        }),
-    ))
+    controller.play_youtube(&video_id, request.start).await?;
+    Ok(accepted(Source::Youtube))
 }
 
-fn yes() -> bool {
+fn default_resume() -> bool {
     true
 }
 
@@ -164,7 +197,7 @@ pub struct JellyfinRequest {
     /// The start in seconds. Without it, resume decides.
     start: Option<f64>,
     /// Without start: start at the resume position of the Jellyfin user of the player.
-    #[serde(default = "yes")]
+    #[serde(default = "default_resume")]
     #[schema(default = true)]
     resume: bool,
     #[serde(default)]
@@ -176,16 +209,18 @@ pub struct JellyfinRequest {
     responses((status = 202, body = Started), (status = 400, body = ErrorBody), (status = 404, body = ErrorBody),
               (status = 503, body = ErrorBody)))]
 async fn play_jellyfin(
-    State(c): State<Arc<Controller>>,
-    Json(r): Json<JellyfinRequest>,
+    State(controller): SharedController,
+    Json(request): Json<JellyfinRequest>,
 ) -> Result<(StatusCode, Json<Started>)> {
-    c.play_jellyfin(&r.item_id, r.start, r.resume, r.player)
+    controller
+        .play_jellyfin(
+            &request.item_id,
+            request.start,
+            request.resume,
+            request.player,
+        )
         .await?;
-    let source = match r.player {
-        JellyfinPlayer::Shim => Source::Jellyfin,
-        JellyfinPlayer::Kodi => Source::Kodi,
-    };
-    Ok((StatusCode::ACCEPTED, Json(Started { source })))
+    Ok(accepted(request.player.source()))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -195,49 +230,55 @@ pub struct UrlRequest {
     url: String,
     /// The title for mpv
     title: Option<String>,
+    /// True for an audio address without a known extension. mpv then plays
+    /// no picture and leaves the TV on Plasma.
+    #[serde(default)]
+    audio: bool,
 }
 
 /// Plays a media address in the player that fits it.
 #[utoipa::path(post, path = "/api/v1/play/url", tag = "play", request_body = UrlRequest,
     responses((status = 202, body = Started), (status = 400, body = ErrorBody)))]
 async fn play_url(
-    State(c): State<Arc<Controller>>,
-    Json(r): Json<UrlRequest>,
+    State(controller): SharedController,
+    Json(request): Json<UrlRequest>,
 ) -> Result<(StatusCode, Json<Started>)> {
-    let source = c.play_url(&r.url, r.title.as_deref()).await?;
-    Ok((StatusCode::ACCEPTED, Json(Started { source })))
+    let source = controller
+        .play_url(&request.url, request.title.as_deref(), request.audio)
+        .await?;
+    Ok(accepted(source))
 }
 
 /// Pauses the player that plays.
 #[utoipa::path(post, path = "/api/v1/playback/pause", tag = "playback",
     responses((status = 204), (status = 409, body = ErrorBody)))]
-async fn pause(State(c): State<Arc<Controller>>) -> Result<StatusCode> {
-    c.set_paused(Some(true))
-        .await
-        .map(|_| StatusCode::NO_CONTENT)
+async fn pause(State(controller): SharedController) -> Result<StatusCode> {
+    controller.set_paused(Some(true)).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Continues the paused media.
 #[utoipa::path(post, path = "/api/v1/playback/resume", tag = "playback",
     responses((status = 204), (status = 409, body = ErrorBody)))]
-async fn resume(State(c): State<Arc<Controller>>) -> Result<StatusCode> {
-    c.set_paused(Some(false))
-        .await
-        .map(|_| StatusCode::NO_CONTENT)
+async fn resume(State(controller): SharedController) -> Result<StatusCode> {
+    controller.set_paused(Some(false)).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Pauses or continues.
 #[utoipa::path(post, path = "/api/v1/playback/toggle", tag = "playback",
     responses((status = 204), (status = 409, body = ErrorBody)))]
-async fn toggle(State(c): State<Arc<Controller>>) -> Result<StatusCode> {
-    c.set_paused(None).await.map(|_| StatusCode::NO_CONTENT)
+async fn toggle(State(controller): SharedController) -> Result<StatusCode> {
+    controller.set_paused(None).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Stops the media. Kodi and VacuumTube keep running.
 #[utoipa::path(post, path = "/api/v1/playback/stop", tag = "playback",
     responses((status = 204), (status = 409, body = ErrorBody)))]
-async fn stop(State(c): State<Arc<Controller>>) -> Result<StatusCode> {
-    c.stop().await.map(|_| StatusCode::NO_CONTENT)
+async fn stop(State(controller): SharedController) -> Result<StatusCode> {
+    controller.stop().await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -249,26 +290,43 @@ pub struct SeekRequest {
 /// Goes to a position in the media.
 #[utoipa::path(post, path = "/api/v1/playback/seek", tag = "playback", request_body = SeekRequest,
     responses((status = 204), (status = 400, body = ErrorBody), (status = 409, body = ErrorBody)))]
-async fn seek(State(c): State<Arc<Controller>>, Json(r): Json<SeekRequest>) -> Result<StatusCode> {
-    c.seek(r.position).await.map(|_| StatusCode::NO_CONTENT)
+async fn seek(
+    State(controller): SharedController,
+    Json(request): Json<SeekRequest>,
+) -> Result<StatusCode> {
+    controller.seek(request.position).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Stops all media and ends Kodi and VacuumTube, so the home screen shows.
 #[utoipa::path(post, path = "/api/v1/home", tag = "device", responses((status = 204)))]
-async fn home(State(c): State<Arc<Controller>>) -> Result<StatusCode> {
-    c.home().await.map(|_| StatusCode::NO_CONTENT)
+async fn home(State(controller): SharedController) -> Result<StatusCode> {
+    controller.home().await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Sends Wake-on-LAN to the TV, with the addresses of WAKE_ON_LAN_MACS.
 #[utoipa::path(post, path = "/api/v1/tv/wake", tag = "device",
     responses((status = 204), (status = 503, body = ErrorBody)))]
-async fn wake_tv(State(c): State<Arc<Controller>>) -> Result<StatusCode> {
-    c.wake_tv().await.map(|_| StatusCode::NO_CONTENT)
+async fn wake_tv(State(controller): SharedController) -> Result<StatusCode> {
+    controller.wake_tv().await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_url_request_takes_an_optional_audio_flag() {
+        let plain: UrlRequest = serde_json::from_str(r#"{"url": "http://h/a"}"#).unwrap();
+        assert!(!plain.audio);
+        assert_eq!(plain.title, None);
+        let audio: UrlRequest =
+            serde_json::from_str(r#"{"url": "http://h/a", "title": "T", "audio": true}"#).unwrap();
+        assert!(audio.audio);
+        assert_eq!(audio.title.as_deref(), Some("T"));
+    }
 
     #[test]
     fn documents_all_paths() {
@@ -279,8 +337,19 @@ mod tests {
             "/api/v1/play/youtube",
             "/api/v1/play/jellyfin",
             "/api/v1/apps/{id}/launch",
+            "/api/v1/play/url",
+            "/api/v1/playback/seek",
+            "/api/v1/tv/wake",
         ] {
             assert!(doc.paths.paths.contains_key(path), "{path} is missing");
         }
+    }
+
+    #[test]
+    fn answers_errors_with_their_status() {
+        let response = Error::nothing_plays().into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let response = Error::not_installed("x").into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

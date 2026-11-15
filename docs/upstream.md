@@ -17,6 +17,7 @@ The HTPC uses many external projects. This page lists them and shows how the pro
 | [TizenTube Cobalt](https://github.com/reisxd/TizenTubeCobalt) | YouTube app | APK from the GitHub releases |
 | [S0undTV](https://github.com/S0und/S0undTV) | Twitch app | APK from the GitHub releases |
 | [streamlink-ttvlol](https://github.com/2bc4/streamlink-ttvlol) | The list of public Twitch proxy servers for S0undTV | A link in the configuration file |
+| [UxPlay](https://github.com/FDH2/UxPlay) | AirPlay receiver for audio and screen mirroring | Package of the distribution. GPL-3.0-or-later. |
 | [libcec](https://github.com/Pulse-Eight/libcec) and `v4l-utils` | HDMI-CEC | Packages of the distribution |
 | Rust crates, for example [axum](https://github.com/tokio-rs/axum), [tokio](https://tokio.rs) and [utoipa](https://github.com/juhaku/utoipa) | The control API in `control/` | From crates.io at the versions of `control/Cargo.lock`, built into the static program. Their licenses are MIT or Apache-2.0, some also ISC, BSD or Unicode-3.0. |
 

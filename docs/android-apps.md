@@ -40,3 +40,7 @@ On Fedora, SELinux runs in enforcing mode. The policy of `waydroid-selinux` runs
 | HDR | Waydroid sends no HDR to the host. Android reports a display without HDR types and without wide color, so YouTube sends SDR video. The apps play SDR, also when Plasma is in HDR mode. |
 | Sound | Waydroid plays PCM through PipeWire. Passthrough is not possible. |
 | Keys | The arrow keys, Enter and Escape reach Android as the keys of a TV remote |
+
+## Google Cast
+
+The Android TV image contains the Chromecast receiver of Google. It does not work as a cast target. Its native code exists only for ARM, and its crash handler cannot load through the ARM translation, so the receiver stops when it starts a receiver app. The image has no device credentials for the receiver either. Waydroid also sits behind NAT, so a phone does not see the receiver without a forwarded port and an own mDNS record. Phones cast to the HTPC with DLNA, AirPlay and DIAL instead. [control-api.md](control-api.md) and [airplay.md](airplay.md) describe them.

@@ -26,6 +26,10 @@ check_settings() {
 	yes | no) ;;
 	*) fail "CONTROL_DLNA must be yes or no." ;;
 	esac
+	case "$(config_get CONTROL_DIAL yes)" in
+	yes | no) ;;
+	*) fail "CONTROL_DIAL must be yes or no." ;;
+	esac
 }
 
 # Prints the path of the program to install. A download goes into the
@@ -49,30 +53,16 @@ fetch_program() {
 
 # Fedora turns on firewalld. Its desktop zones allow the high ports, but
 # other zones block them. A rule for the port and for SSDP lets Home
-# Assistant and the DLNA apps reach the service. Each rule goes into the
-# running and the permanent configuration. A reload of firewalld would drop
-# the runtime rules of other programs, for example the bridge of Waydroid.
+# Assistant and the DLNA apps reach the service.
 open_firewall() {
 	local port zone
 	command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1 || return 0
 	port="$(config_get CONTROL_API_PORT 8780)"
 	zone="$(firewall-cmd --get-default-zone)"
 	firewall_allow "${zone}" "--add-port=${port}/tcp" "--query-port=${port}/tcp" "TCP port ${port}"
-	if [[ "$(config_get CONTROL_DLNA yes)" == yes ]]; then
+	if [[ "$(config_get CONTROL_DLNA yes)" == yes || "$(config_get CONTROL_DIAL yes)" == yes ]]; then
 		firewall_allow "${zone}" --add-service=ssdp --query-service=ssdp SSDP
 	fi
-}
-
-firewall_allow() {
-	local zone="$1" add="$2" query="$3" name="$4" mode
-	for mode in "" --permanent; do
-		# shellcheck disable=SC2086 # mode is empty or one option
-		if ! firewall-cmd ${mode} --zone="${zone}" "${query}" >/dev/null; then
-			firewall-cmd ${mode} --zone="${zone}" "${add}" >/dev/null
-			[[ -n "${mode}" ]] && info "Allowed ${name} in the firewall zone ${zone}"
-		fi
-	done
-	return 0
 }
 
 install_packages "${component_dir}"

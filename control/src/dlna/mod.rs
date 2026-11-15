@@ -10,10 +10,10 @@
 
 mod description;
 pub mod ssdp;
-mod xml;
+pub mod xml;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::Router;
@@ -22,12 +22,13 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
+use reqwest::Method;
 use tokio::sync::Notify;
 
 use crate::control::Controller;
-use crate::error::ApiError;
+use crate::error::{Error, ErrorKind};
 use crate::status::{PlayState, Source, Status};
-use description::{AV_TRANSPORT, CONNECTION_MANAGER, RENDERING_CONTROL, SINK_PROTOCOLS};
+use description::{SINK_PROTOCOLS, Service};
 use xml::{element_text, escape};
 
 /// A start through DLNA shows TRANSITIONING for at most this long, until
@@ -35,11 +36,20 @@ use xml::{element_text, escape};
 const START_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_SUBSCRIBERS: usize = 32;
 const DEFAULT_SUBSCRIPTION: u64 = 1800;
+const SUBSCRIPTION_LIMITS: (u64, u64) = (60, 3600);
+/// The control point needs the answer to SUBSCRIBE with the SID before the
+/// first event.
+const FIRST_EVENT_DELAY: Duration = Duration::from_millis(200);
+const EVENT_TIMEOUT: Duration = Duration::from_secs(3);
 /// After SetAVTransportURI, the renderer reports STOPPED for at most this
 /// long, also while another player plays. A control point calls Play only
 /// on a renderer that does not play, and Home Assistant reads the state
 /// before the player had time to stop.
 const SET_TIMEOUT: Duration = Duration::from_secs(60);
+const AVT_EVENT_NAMESPACE: &str = "urn:schemas-upnp-org:metadata-1-0/AVT/";
+
+static NOTIFY: LazyLock<Method> =
+    LazyLock::new(|| Method::from_bytes(b"NOTIFY").expect("NOTIFY is a valid method"));
 
 pub struct Dlna {
     controller: Arc<Controller>,
@@ -48,7 +58,44 @@ pub struct Dlna {
     http: reqwest::Client,
     renderer: Arc<Mutex<Renderer>>,
     subscribers: Mutex<HashMap<String, Subscriber>>,
+    /// Sends an event at once, also when the player state is the same
     changed: Notify,
+}
+
+/// The TransportState of AVTransport
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TransportState {
+    Stopped,
+    Playing,
+    PausedPlayback,
+    Transitioning,
+    NoMediaPresent,
+}
+
+impl TransportState {
+    fn as_str(self) -> &'static str {
+        match self {
+            TransportState::Stopped => "STOPPED",
+            TransportState::Playing => "PLAYING",
+            TransportState::PausedPlayback => "PAUSED_PLAYBACK",
+            TransportState::Transitioning => "TRANSITIONING",
+            TransportState::NoMediaPresent => "NO_MEDIA_PRESENT",
+        }
+    }
+
+    /// The value of CurrentTransportActions
+    fn actions(self) -> &'static str {
+        match self {
+            TransportState::Playing | TransportState::Transitioning => "Pause,Stop,Seek",
+            TransportState::PausedPlayback => "Play,Stop,Seek",
+            TransportState::Stopped => "Play",
+            TransportState::NoMediaPresent => "",
+        }
+    }
+
+    fn has_media(self) -> bool {
+        self != TransportState::NoMediaPresent
+    }
 }
 
 /// What the control point set with SetAVTransportURI
@@ -63,21 +110,71 @@ struct Renderer {
     set_since: Option<Instant>,
 }
 
+impl Renderer {
+    fn transport_state(&self, status: &Status) -> TransportState {
+        if self
+            .set_since
+            .is_some_and(|since| since.elapsed() < SET_TIMEOUT)
+        {
+            return TransportState::Stopped;
+        }
+        match status.state {
+            PlayState::Playing => TransportState::Playing,
+            PlayState::Paused => TransportState::PausedPlayback,
+            PlayState::Buffering => TransportState::Transitioning,
+            PlayState::Idle if self.starting_since.is_some() => TransportState::Transitioning,
+            PlayState::Idle if !self.uri.is_empty() => TransportState::Stopped,
+            PlayState::Idle => TransportState::NoMediaPresent,
+        }
+    }
+
+    /// The address and metadata of the media that plays. Media that the
+    /// renderer did not start gets metadata from the player.
+    fn current_media(&self, status: &Status) -> (String, String) {
+        if status.source == Source::Idle || self.set_since.is_some() {
+            return (self.uri.clone(), self.metadata.clone());
+        }
+        let uri = if self.started {
+            self.uri.clone()
+        } else {
+            status.url.clone().unwrap_or_default()
+        };
+        let metadata = didl(status, &uri);
+        (uri, metadata)
+    }
+
+    /// Keeps the renderer state in line with the player.
+    fn follow_player(&mut self, status: &Status) {
+        if status.source != Source::Idle {
+            self.starting_since = None;
+        } else if self
+            .starting_since
+            .is_none_or(|since| since.elapsed() > START_TIMEOUT)
+        {
+            self.starting_since = None;
+            self.started = false;
+        }
+    }
+}
+
 struct Subscriber {
-    service: &'static str,
+    service: Service,
     callback: String,
     expires: Instant,
     seq: u32,
 }
 
+/// The output arguments of a SOAP action
+type Arguments = Vec<(&'static str, String)>;
+
 impl Dlna {
     pub fn new(controller: Arc<Controller>) -> Arc<Dlna> {
         Arc::new(Dlna {
-            udn: format!("uuid:{}", stable_uuid()),
+            udn: format!("uuid:{}", stable_uuid("dlna")),
             name: controller.config.name.clone(),
             controller,
             http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(3))
+                .timeout(EVENT_TIMEOUT)
                 .build()
                 .expect("the HTTP client starts"),
             renderer: Arc::new(Mutex::new(Renderer::default())),
@@ -87,49 +184,30 @@ impl Dlna {
     }
 
     pub fn router(self: &Arc<Self>) -> Router {
-        Router::new()
-            .route(
-                "/dlna/device.xml",
-                get(|State(d): State<Arc<Dlna>>| async move {
-                    xml_response(description::device(&d.name, &d.udn))
-                }),
-            )
-            .route(
-                "/dlna/AVTransport.xml",
-                get(|| async { xml_response(description::av_transport()) }),
-            )
-            .route(
-                "/dlna/RenderingControl.xml",
-                get(|| async { xml_response(description::rendering_control()) }),
-            )
-            .route(
-                "/dlna/ConnectionManager.xml",
-                get(|| async { xml_response(description::connection_manager()) }),
-            )
-            .route(
-                "/dlna/AVTransport/control",
-                post(|s, h, b| control(s, AV_TRANSPORT, h, b)),
-            )
-            .route(
-                "/dlna/RenderingControl/control",
-                post(|s, h, b| control(s, RENDERING_CONTROL, h, b)),
-            )
-            .route(
-                "/dlna/ConnectionManager/control",
-                post(|s, h, b| control(s, CONNECTION_MANAGER, h, b)),
-            )
-            .route(
-                "/dlna/AVTransport/event",
-                any(|s, r| subscription(s, AV_TRANSPORT, r)),
-            )
-            .route(
-                "/dlna/RenderingControl/event",
-                any(|s, r| subscription(s, RENDERING_CONTROL, r)),
-            )
-            .route(
-                "/dlna/ConnectionManager/event",
-                any(|s, r| subscription(s, CONNECTION_MANAGER, r)),
-            )
+        let router = Router::new().route(
+            "/dlna/device.xml",
+            get(|State(dlna): State<Arc<Dlna>>| async move {
+                xml_response(description::device(&dlna.name, &dlna.udn))
+            }),
+        );
+        Service::ALL
+            .into_iter()
+            .fold(router, |router, service| {
+                let name = service.name();
+                router
+                    .route(
+                        &format!("/dlna/{name}.xml"),
+                        get(move || async move { xml_response(service.description()) }),
+                    )
+                    .route(
+                        &format!("/dlna/{name}/control"),
+                        post(move |dlna, headers, body| control(dlna, service, headers, body)),
+                    )
+                    .route(
+                        &format!("/dlna/{name}/event"),
+                        any(move |dlna, request| subscription(dlna, service, request)),
+                    )
+            })
             .with_state(self.clone())
     }
 
@@ -146,158 +224,83 @@ impl Dlna {
         loop {
             tokio::select! {
                 result = updates.changed() => if result.is_err() { return },
-                _ = self.changed.notified() => last = None,
+                () = self.changed.notified() => last = None,
             }
             let status = updates.borrow_and_update().clone();
-            self.follow_player(&status);
+            self.renderer.lock().unwrap().follow_player(&status);
             if last
                 .as_ref()
-                .is_some_and(|l| l.same_media_and_state(&status))
+                .is_some_and(|last| last.same_media_and_state(&status))
             {
                 continue;
             }
-            last = Some(status.clone());
+            let last_change = self.av_last_change(&status);
+            last = Some(status);
             self.notify(
-                AV_TRANSPORT,
-                vec![("LastChange".into(), self.av_last_change(&status))],
+                |_, subscriber| subscriber.service == Service::AvTransport,
+                &[("LastChange", last_change)],
             );
         }
     }
 
-    /// Keeps the renderer state in line with the player.
-    fn follow_player(&self, status: &Status) {
-        let mut renderer = self.renderer.lock().unwrap();
-        if status.source != Source::Idle {
-            renderer.starting_since = None;
-        } else if renderer
-            .starting_since
-            .is_none_or(|since| since.elapsed() > START_TIMEOUT)
-        {
-            renderer.starting_since = None;
-            renderer.started = false;
-        }
-    }
-
-    fn transport_state(&self, status: &Status, renderer: &Renderer) -> &'static str {
-        match status.state {
-            _ if renderer
-                .set_since
-                .is_some_and(|since| since.elapsed() < SET_TIMEOUT) =>
-            {
-                "STOPPED"
-            }
-            PlayState::Playing => "PLAYING",
-            PlayState::Paused => "PAUSED_PLAYBACK",
-            PlayState::Buffering => "TRANSITIONING",
-            PlayState::Idle if renderer.starting_since.is_some() => "TRANSITIONING",
-            PlayState::Idle if !renderer.uri.is_empty() => "STOPPED",
-            PlayState::Idle => "NO_MEDIA_PRESENT",
-        }
-    }
-
-    fn transport_actions(state: &str) -> &'static str {
-        match state {
-            "PLAYING" | "TRANSITIONING" => "Pause,Stop,Seek",
-            "PAUSED_PLAYBACK" => "Play,Stop,Seek",
-            "STOPPED" => "Play",
-            _ => "",
-        }
-    }
-
-    /// The address and metadata of the media that plays. Media that the
-    /// renderer did not start gets metadata from the player.
-    fn current_media(&self, status: &Status, renderer: &Renderer) -> (String, String) {
-        if status.source == Source::Idle || renderer.set_since.is_some() {
-            return (renderer.uri.clone(), renderer.metadata.clone());
-        }
-        let uri = if renderer.started {
-            renderer.uri.clone()
-        } else {
-            status.url.clone().unwrap_or_default()
-        };
-        (uri.clone(), didl(status, &uri))
-    }
-
     fn av_last_change(&self, status: &Status) -> String {
         let renderer = self.renderer();
-        let state = self.transport_state(status, &renderer);
-        let (uri, metadata) = self.current_media(status, &renderer);
+        let state = renderer.transport_state(status);
+        let (uri, metadata) = renderer.current_media(status);
         let duration = hms(status.duration.unwrap_or(0.0));
         let values = [
-            ("TransportState", state.to_string()),
+            ("TransportState", state.as_str().to_string()),
             ("TransportStatus", "OK".into()),
-            (
-                "CurrentTransportActions",
-                Self::transport_actions(state).into(),
-            ),
+            ("CurrentTransportActions", state.actions().into()),
             ("AVTransportURI", uri.clone()),
             ("AVTransportURIMetaData", metadata.clone()),
             ("CurrentTrackURI", uri),
             ("CurrentTrackMetaData", metadata),
             ("CurrentMediaDuration", duration.clone()),
             ("CurrentTrackDuration", duration),
-            (
-                "NumberOfTracks",
-                if state == "NO_MEDIA_PRESENT" {
-                    "0"
-                } else {
-                    "1"
-                }
-                .into(),
-            ),
+            ("NumberOfTracks", track_count(state.has_media()).into()),
             ("CurrentPlayMode", "NORMAL".into()),
             ("TransportPlaySpeed", "1".into()),
         ];
-        last_change("urn:schemas-upnp-org:metadata-1-0/AVT/", &values)
+        last_change(AVT_EVENT_NAMESPACE, &values)
     }
 
-    fn initial_event(&self, service: &str) -> Vec<(String, String)> {
+    /// The first event of a subscription has all evented values.
+    fn initial_event(&self, service: Service) -> Arguments {
         match service {
-            AV_TRANSPORT => vec![(
-                "LastChange".into(),
-                self.av_last_change(&self.controller.status()),
-            )],
-            RENDERING_CONTROL => vec![(
-                "LastChange".into(),
-                // The renderer has no rendering values. An InstanceID
-                // without values makes control points warn, so the event
-                // is empty.
-                String::new(),
-            )],
-            _ => vec![
-                ("SourceProtocolInfo".into(), String::new()),
-                ("SinkProtocolInfo".into(), SINK_PROTOCOLS.into()),
-                ("CurrentConnectionIDs".into(), "0".into()),
+            Service::AvTransport => {
+                vec![("LastChange", self.av_last_change(&self.controller.status()))]
+            }
+            // The renderer has no rendering values. An InstanceID without
+            // values makes control points warn, so the event is empty.
+            Service::RenderingControl => vec![("LastChange", String::new())],
+            Service::ConnectionManager => vec![
+                ("SourceProtocolInfo", String::new()),
+                ("SinkProtocolInfo", SINK_PROTOCOLS.into()),
+                ("CurrentConnectionIDs", "0".into()),
             ],
         }
     }
 
-    /// Sends an event to all subscribers of a service, or to one SID.
-    fn notify(&self, service: &'static str, properties: Vec<(String, String)>) {
-        self.notify_where(properties, |sid, s| s.service == service && !sid.is_empty());
-    }
-
-    fn notify_where(
-        &self,
-        properties: Vec<(String, String)>,
-        select: impl Fn(&str, &Subscriber) -> bool,
-    ) {
-        let body = property_set(&properties);
+    /// Sends an event to each subscriber that `select` takes.
+    fn notify(&self, select: impl Fn(&str, &Subscriber) -> bool, properties: &[(&str, String)]) {
+        let body = property_set(properties);
         let mut subscribers = self.subscribers.lock().unwrap();
-        subscribers.retain(|_, s| s.expires > Instant::now());
-        for (sid, subscriber) in subscribers.iter_mut().filter(|(sid, s)| select(sid, s)) {
+        subscribers.retain(|_, subscriber| subscriber.expires > Instant::now());
+        for (sid, subscriber) in subscribers
+            .iter_mut()
+            .filter(|(sid, subscriber)| select(sid, subscriber))
+        {
             let request = self
                 .http
-                .request(
-                    reqwest::Method::from_bytes(b"NOTIFY").expect("NOTIFY is a method"),
-                    &subscriber.callback,
-                )
+                .request(NOTIFY.clone(), &subscriber.callback)
                 .header("Content-Type", "text/xml; charset=\"utf-8\"")
                 .header("NT", "upnp:event")
                 .header("NTS", "upnp:propchange")
                 .header("SID", sid.as_str())
                 .header("SEQ", subscriber.seq.to_string())
                 .body(body.clone());
+            // The first event has SEQ 0. After the wrap, SEQ starts at 1.
             subscriber.seq = subscriber.seq.wrapping_add(1).max(1);
             let callback = subscriber.callback.clone();
             tokio::spawn(async move {
@@ -308,107 +311,56 @@ impl Dlna {
         }
     }
 
-    async fn av_transport(
-        &self,
-        action: &str,
-        body: &str,
-    ) -> Result<Vec<(&'static str, String)>, Fault> {
+    async fn av_transport(&self, action: &str, body: &str) -> Result<Arguments, Fault> {
         let status = self.controller.status();
         let renderer = self.renderer();
-        let state = self.transport_state(&status, &renderer);
-        let (uri, metadata) = self.current_media(&status, &renderer);
+        let state = renderer.transport_state(&status);
+        let (uri, metadata) = renderer.current_media(&status);
+        let duration = hms(status.duration.unwrap_or(0.0));
         match action {
             "SetAVTransportURI" => {
-                let uri = element_text(body, "CurrentURI").unwrap_or_default();
-                let metadata = element_text(body, "CurrentURIMetaData").unwrap_or_default();
-                tracing::info!("DLNA address {uri}");
-                *self.renderer.lock().unwrap() = Renderer {
-                    uri,
-                    metadata,
-                    started: false,
-                    starting_since: None,
-                    set_since: Some(Instant::now()),
-                };
-                self.changed.notify_one();
+                self.set_uri(
+                    element_text(body, "CurrentURI").unwrap_or_default(),
+                    element_text(body, "CurrentURIMetaData").unwrap_or_default(),
+                );
                 Ok(vec![])
             }
-            "Play" => {
-                if !renderer.uri.is_empty() && !renderer.started {
-                    self.start(renderer);
-                } else {
-                    self.controller
-                        .set_paused(Some(false))
-                        .await
-                        .map_err(Fault::from)?;
-                }
+            "Play" if !renderer.uri.is_empty() && !renderer.started => {
+                self.start(renderer);
                 Ok(vec![])
             }
-            "Pause" => self
-                .controller
-                .set_paused(Some(true))
-                .await
-                .map(|_| vec![])
-                .map_err(Fault::from),
-            "Stop" => {
-                {
-                    let mut current = self.renderer.lock().unwrap();
-                    current.started = false;
-                    current.set_since = None;
-                }
-                match self.controller.stop().await {
-                    Ok(()) => {}
-                    Err(e) if e.code == "nothing_plays" => {}
-                    Err(e) => return Err(e.into()),
-                }
-                self.changed.notify_one();
-                Ok(vec![])
-            }
-            "Seek" => {
-                let unit = element_text(body, "Unit").unwrap_or_default();
-                let target = element_text(body, "Target").unwrap_or_default();
-                if unit != "REL_TIME" && unit != "ABS_TIME" {
-                    return Err(Fault::new(710, "Seek mode not supported"));
-                }
-                let position = parse_hms(&target).ok_or(Fault::new(711, "Illegal seek target"))?;
-                self.controller
-                    .seek(position)
-                    .await
-                    .map(|_| vec![])
-                    .map_err(Fault::from)
-            }
+            "Play" => self.set_paused(false).await,
+            "Pause" => self.set_paused(true).await,
+            "Stop" => self.stop().await,
+            "Seek" => self.seek(body).await,
             "GetTransportInfo" => Ok(vec![
-                ("CurrentTransportState", state.into()),
+                ("CurrentTransportState", state.as_str().into()),
                 ("CurrentTransportStatus", "OK".into()),
                 ("CurrentSpeed", "1".into()),
             ]),
             "GetPositionInfo" => {
                 let position = hms(status.position.unwrap_or(0.0));
                 Ok(vec![
-                    ("Track", if uri.is_empty() { "0" } else { "1" }.into()),
-                    ("TrackDuration", hms(status.duration.unwrap_or(0.0))),
+                    ("Track", track_count(!uri.is_empty()).into()),
+                    ("TrackDuration", duration),
                     ("TrackMetaData", metadata),
                     ("TrackURI", uri),
                     ("RelTime", position.clone()),
                     ("AbsTime", position),
-                    ("RelCount", "2147483647".into()),
-                    ("AbsCount", "2147483647".into()),
+                    ("RelCount", i32::MAX.to_string()),
+                    ("AbsCount", i32::MAX.to_string()),
                 ])
             }
             "GetMediaInfo" => Ok(vec![
-                ("NrTracks", if uri.is_empty() { "0" } else { "1" }.into()),
-                ("MediaDuration", hms(status.duration.unwrap_or(0.0))),
+                ("NrTracks", track_count(!uri.is_empty()).into()),
+                ("MediaDuration", duration),
                 ("CurrentURI", uri),
                 ("CurrentURIMetaData", metadata),
                 ("NextURI", String::new()),
                 ("NextURIMetaData", String::new()),
                 (
                     "PlayMedium",
-                    if state == "NO_MEDIA_PRESENT" {
-                        "NONE"
-                    } else {
-                        "NETWORK"
-                    }
-                    .into(),
+                    if state.has_media() { "NETWORK" } else { "NONE" }.into(),
                 ),
                 ("RecordMedium", "NOT_IMPLEMENTED".into()),
                 ("WriteStatus", "NOT_IMPLEMENTED".into()),
@@ -417,16 +369,25 @@ impl Dlna {
                 ("PlayMode", "NORMAL".into()),
                 ("RecQualityMode", "NOT_IMPLEMENTED".into()),
             ]),
-            "GetCurrentTransportActions" => {
-                Ok(vec![("Actions", Self::transport_actions(state).into())])
-            }
+            "GetCurrentTransportActions" => Ok(vec![("Actions", state.actions().into())]),
             "GetDeviceCapabilities" => Ok(vec![
                 ("PlayMedia", "NETWORK".into()),
                 ("RecMedia", "NOT_IMPLEMENTED".into()),
                 ("RecQualityModes", "NOT_IMPLEMENTED".into()),
             ]),
-            _ => Err(Fault::new(401, "Invalid Action")),
+            _ => Err(Fault::INVALID_ACTION),
         }
+    }
+
+    fn set_uri(&self, uri: String, metadata: String) {
+        tracing::info!("DLNA address {uri}");
+        *self.renderer.lock().unwrap() = Renderer {
+            uri,
+            metadata,
+            set_since: Some(Instant::now()),
+            ..Renderer::default()
+        };
+        self.changed.notify_one();
     }
 
     /// The start can take some seconds, for example when Kodi must end
@@ -442,9 +403,13 @@ impl Dlna {
         self.changed.notify_one();
         let controller = self.controller.clone();
         let title = element_text(&renderer.metadata, "title");
+        let audio = is_audio_item(&renderer.metadata);
         let shared = self.renderer.clone();
         tokio::spawn(async move {
-            if let Err(error) = controller.play_url(&renderer.uri, title.as_deref()).await {
+            if let Err(error) = controller
+                .play_url(&renderer.uri, title.as_deref(), audio)
+                .await
+            {
                 tracing::warn!("DLNA start of {} failed: {error}", renderer.uri);
                 let mut current = shared.lock().unwrap();
                 current.started = false;
@@ -453,7 +418,39 @@ impl Dlna {
         });
     }
 
-    async fn connection_manager(&self, action: &str) -> Result<Vec<(&'static str, String)>, Fault> {
+    async fn set_paused(&self, paused: bool) -> Result<Arguments, Fault> {
+        self.controller.set_paused(Some(paused)).await?;
+        Ok(vec![])
+    }
+
+    /// A Stop without media is no error, because the control point only
+    /// wants the renderer to be stopped.
+    async fn stop(&self) -> Result<Arguments, Fault> {
+        {
+            let mut current = self.renderer.lock().unwrap();
+            current.started = false;
+            current.set_since = None;
+        }
+        match self.controller.stop().await {
+            Err(error) if error.kind != ErrorKind::NothingPlays => return Err(error.into()),
+            _ => {}
+        }
+        self.changed.notify_one();
+        Ok(vec![])
+    }
+
+    async fn seek(&self, body: &str) -> Result<Arguments, Fault> {
+        let unit = element_text(body, "Unit").unwrap_or_default();
+        if unit != "REL_TIME" && unit != "ABS_TIME" {
+            return Err(Fault::new(710, "Seek mode not supported"));
+        }
+        let target = element_text(body, "Target").unwrap_or_default();
+        let position = parse_hms(&target).ok_or(Fault::new(711, "Illegal seek target"))?;
+        self.controller.seek(position).await?;
+        Ok(vec![])
+    }
+
+    fn connection_manager(action: &str) -> Result<Arguments, Fault> {
         match action {
             "GetProtocolInfo" => Ok(vec![
                 ("Source", String::new()),
@@ -469,9 +466,14 @@ impl Dlna {
                 ("Direction", "Input".into()),
                 ("Status", "OK".into()),
             ]),
-            _ => Err(Fault::new(401, "Invalid Action")),
+            _ => Err(Fault::INVALID_ACTION),
         }
     }
+}
+
+/// "1" when the renderer has a track, else "0"
+fn track_count(has_track: bool) -> &'static str {
+    if has_track { "1" } else { "0" }
 }
 
 /// A UPnP error answer
@@ -481,17 +483,19 @@ struct Fault {
 }
 
 impl Fault {
-    fn new(code: u16, description: &'static str) -> Fault {
+    const INVALID_ACTION: Fault = Fault::new(401, "Invalid Action");
+
+    const fn new(code: u16, description: &'static str) -> Fault {
         Fault { code, description }
     }
 }
 
-impl From<ApiError> for Fault {
-    fn from(error: ApiError) -> Fault {
+impl From<Error> for Fault {
+    fn from(error: Error) -> Fault {
         tracing::info!("DLNA action failed: {error}");
-        match error.code {
-            "nothing_plays" => Fault::new(701, "Transition not available"),
-            "bad_request" => Fault::new(402, "Invalid Args"),
+        match error.kind {
+            ErrorKind::NothingPlays => Fault::new(701, "Transition not available"),
+            ErrorKind::BadRequest => Fault::new(402, "Invalid Args"),
             _ => Fault::new(501, "Action Failed"),
         }
     }
@@ -499,128 +503,147 @@ impl From<ApiError> for Fault {
 
 async fn control(
     State(dlna): State<Arc<Dlna>>,
-    service: &'static str,
+    service: Service,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let body = String::from_utf8_lossy(&body);
     let action = headers
         .get("soapaction")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.trim_matches('"'))
-        .and_then(|v| v.rsplit_once('#'))
-        .map(|(_, a)| a.to_string())
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim_matches('"'))
+        .and_then(|value| value.rsplit_once('#'))
+        .map(|(_, action)| action.to_string())
         .unwrap_or_default();
     let result = match service {
-        AV_TRANSPORT => dlna.av_transport(&action, &body).await,
-        RENDERING_CONTROL => Err(Fault::new(401, "Invalid Action")),
-        _ => dlna.connection_manager(&action).await,
+        Service::AvTransport => dlna.av_transport(&action, &body).await,
+        Service::RenderingControl => Err(Fault::INVALID_ACTION),
+        Service::ConnectionManager => Dlna::connection_manager(&action),
     };
     match result {
-        Ok(values) => {
-            let arguments: String = values
-                .iter()
-                .map(|(k, v)| format!("<{k}>{}</{k}>", escape(v)))
-                .collect();
-            let body = format!(
-                "<u:{action}Response xmlns:u=\"{service}\">{arguments}</u:{action}Response>"
-            );
-            xml_response(envelope(&body))
-        }
-        Err(fault) => {
-            let body = format!(
-                "<s:Fault><faultcode>s:Client</faultcode><faultstring>UPnPError</faultstring><detail>\
-                 <UPnPError xmlns=\"urn:schemas-upnp-org:control-1-0\"><errorCode>{}</errorCode>\
-                 <errorDescription>{}</errorDescription></UPnPError></detail></s:Fault>",
-                fault.code, fault.description
-            );
-            let mut response = xml_response(envelope(&body));
-            *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
-            response
-        }
+        Ok(arguments) => soap_answer(service, &action, &arguments),
+        Err(fault) => soap_fault(&fault),
     }
+}
+
+fn soap_answer(service: Service, action: &str, arguments: &[(&str, String)]) -> Response {
+    let arguments: String = arguments
+        .iter()
+        .map(|(name, value)| format!("<{name}>{}</{name}>", escape(value)))
+        .collect();
+    let body = format!(
+        "<u:{action}Response xmlns:u=\"{}\">{arguments}</u:{action}Response>",
+        service.urn()
+    );
+    xml_response(envelope(&body))
+}
+
+/// UPnP sends an error as a SOAP fault with HTTP status 500.
+fn soap_fault(fault: &Fault) -> Response {
+    let body = format!(
+        "<s:Fault><faultcode>s:Client</faultcode><faultstring>UPnPError</faultstring><detail>\
+         <UPnPError xmlns=\"urn:schemas-upnp-org:control-1-0\"><errorCode>{}</errorCode>\
+         <errorDescription>{}</errorDescription></UPnPError></detail></s:Fault>",
+        fault.code, fault.description
+    );
+    let mut response = xml_response(envelope(&body));
+    *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+    response
 }
 
 /// SUBSCRIBE and UNSUBSCRIBE of the UPnP event protocol (GENA)
 async fn subscription(
     State(dlna): State<Arc<Dlna>>,
-    service: &'static str,
+    service: Service,
     request: Request,
 ) -> Response {
-    let header = |name: &str| {
-        request
-            .headers()
-            .get(name)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string)
-    };
+    let headers = request.headers();
+    let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
     let seconds = header("timeout")
-        .and_then(|t| {
-            t.strip_prefix("Second-")
-                .and_then(|s| s.parse::<u64>().ok())
-        })
+        .and_then(|timeout| timeout.strip_prefix("Second-"))
+        .and_then(|seconds| seconds.parse::<u64>().ok())
         .unwrap_or(DEFAULT_SUBSCRIPTION)
-        .clamp(60, 3600);
-    match request.method().as_str() {
-        "SUBSCRIBE" => {
-            if let Some(sid) = header("sid") {
-                let mut subscribers = dlna.subscribers.lock().unwrap();
-                return match subscribers.get_mut(&sid) {
-                    Some(s) => {
-                        s.expires = Instant::now() + Duration::from_secs(seconds);
-                        subscribed(&sid, seconds)
-                    }
-                    None => StatusCode::PRECONDITION_FAILED.into_response(),
-                };
-            }
+        .clamp(SUBSCRIPTION_LIMITS.0, SUBSCRIPTION_LIMITS.1);
+    let lifetime = Duration::from_secs(seconds);
+    let sid = header("sid");
+    let answer = match (request.method().as_str(), sid) {
+        ("SUBSCRIBE", Some(sid)) => dlna.renew(sid, lifetime).map(|()| sid.to_string()),
+        ("SUBSCRIBE", None) => {
+            // The callback header has the form <http://host/path>.
             let callback = header("callback")
-                .and_then(|c| {
-                    c.split('>')
-                        .next()
-                        .map(|c| c.trim_start_matches('<').to_string())
-                })
-                .filter(|c| c.starts_with("http://"));
-            let (Some(callback), Some("upnp:event")) = (callback, header("nt").as_deref()) else {
-                return StatusCode::PRECONDITION_FAILED.into_response();
-            };
-            let sid = format!("uuid:{}", random_uuid());
-            {
-                let mut subscribers = dlna.subscribers.lock().unwrap();
-                subscribers.retain(|_, s| s.expires > Instant::now());
-                if subscribers.len() >= MAX_SUBSCRIBERS {
-                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                .and_then(|callback| callback.split('>').next())
+                .map(|callback| callback.trim_start_matches('<'))
+                .filter(|callback| callback.starts_with("http://"));
+            match (callback, header("nt")) {
+                (Some(callback), Some("upnp:event")) => {
+                    dlna.subscribe(service, callback.to_string(), lifetime)
                 }
-                subscribers.insert(
-                    sid.clone(),
-                    Subscriber {
-                        service,
-                        callback,
-                        expires: Instant::now() + Duration::from_secs(seconds),
-                        seq: 0,
-                    },
-                );
+                _ => Err(StatusCode::PRECONDITION_FAILED),
             }
-            // The first event follows the answer, with all evented values.
-            let first = dlna.clone();
-            let first_sid = sid.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                let properties = first.initial_event(service);
-                first.notify_where(properties, |s, _| s == first_sid);
-            });
-            subscribed(&sid, seconds)
         }
-        "UNSUBSCRIBE" => {
-            let removed =
-                header("sid").and_then(|sid| dlna.subscribers.lock().unwrap().remove(&sid));
-            if removed.is_some() {
-                StatusCode::OK
-            } else {
-                StatusCode::PRECONDITION_FAILED
+        ("UNSUBSCRIBE", sid) => {
+            return dlna.unsubscribe(sid).into_response();
+        }
+        _ => Err(StatusCode::METHOD_NOT_ALLOWED),
+    };
+    match answer {
+        Ok(sid) => subscribed(&sid, seconds),
+        Err(status) => status.into_response(),
+    }
+}
+
+impl Dlna {
+    fn renew(&self, sid: &str, lifetime: Duration) -> Result<(), StatusCode> {
+        let mut subscribers = self.subscribers.lock().unwrap();
+        let subscriber = subscribers
+            .get_mut(sid)
+            .ok_or(StatusCode::PRECONDITION_FAILED)?;
+        subscriber.expires = Instant::now() + lifetime;
+        Ok(())
+    }
+
+    /// Adds a subscriber and returns its SID. The first event follows
+    /// the answer, with all evented values.
+    fn subscribe(
+        self: &Arc<Self>,
+        service: Service,
+        callback: String,
+        lifetime: Duration,
+    ) -> Result<String, StatusCode> {
+        let sid = format!("uuid:{}", random_uuid());
+        {
+            let mut subscribers = self.subscribers.lock().unwrap();
+            subscribers.retain(|_, subscriber| subscriber.expires > Instant::now());
+            if subscribers.len() >= MAX_SUBSCRIBERS {
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
             }
-            .into_response()
+            subscribers.insert(
+                sid.clone(),
+                Subscriber {
+                    service,
+                    callback,
+                    expires: Instant::now() + lifetime,
+                    seq: 0,
+                },
+            );
         }
-        _ => StatusCode::METHOD_NOT_ALLOWED.into_response(),
+        let dlna = self.clone();
+        let first_sid = sid.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(FIRST_EVENT_DELAY).await;
+            let properties = dlna.initial_event(service);
+            dlna.notify(|sid, _| sid == first_sid, &properties);
+        });
+        Ok(sid)
+    }
+
+    fn unsubscribe(&self, sid: Option<&str>) -> StatusCode {
+        let removed = sid.and_then(|sid| self.subscribers.lock().unwrap().remove(sid));
+        if removed.is_some() {
+            StatusCode::OK
+        } else {
+            StatusCode::PRECONDITION_FAILED
+        }
     }
 }
 
@@ -635,7 +658,13 @@ fn subscribed(sid: &str, seconds: u64) -> Response {
     response
 }
 
-fn xml_response(body: String) -> Response {
+/// Whether the DIDL-Lite metadata describes an audio item. A DLNA app of a
+/// phone sets the class `object.item.audioItem` for music.
+fn is_audio_item(metadata: &str) -> bool {
+    element_text(metadata, "class").is_some_and(|class| class.starts_with("object.item.audioItem"))
+}
+
+pub fn xml_response(body: String) -> Response {
     let mut response = body.into_response();
     response.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -661,7 +690,7 @@ fn last_change(namespace: &str, values: &[(&str, String)]) -> String {
     format!("<Event xmlns=\"{namespace}\"><InstanceID val=\"0\">{fields}</InstanceID></Event>")
 }
 
-fn property_set(properties: &[(String, String)]) -> String {
+fn property_set(properties: &[(&str, String)]) -> String {
     let fields: String = properties
         .iter()
         .map(|(k, v)| format!("<e:property><{k}>{}</{k}></e:property>", escape(v)))
@@ -756,21 +785,23 @@ fn random_uuid() -> String {
 /// The UDN must stay the same over restarts, or Home Assistant sees a new
 /// device. It comes from a hash of the machine ID, so the machine ID itself
 /// does not go out on the network.
-fn stable_uuid() -> String {
+///
+/// The kind keeps the UDNs of different services on this machine apart.
+pub fn stable_uuid(kind: &str) -> String {
     let machine_id =
         std::fs::read_to_string("/etc/machine-id").unwrap_or_else(|_| "x86-linux-htpc".into());
     let hash = |salt: &str| {
         // FNV-1a, 64 bit
-        let mut h: u64 = 0xcbf29ce484222325;
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
         for b in salt.bytes().chain(machine_id.trim().bytes()) {
             h ^= u64::from(b);
-            h = h.wrapping_mul(0x100000001b3);
+            h = h.wrapping_mul(0x0100_0000_01b3);
         }
         h
     };
     let mut bytes = [0u8; 16];
-    bytes[..8].copy_from_slice(&hash("htpc-control-dlna-a").to_be_bytes());
-    bytes[8..].copy_from_slice(&hash("htpc-control-dlna-b").to_be_bytes());
+    bytes[..8].copy_from_slice(&hash(&format!("htpc-control-{kind}-a")).to_be_bytes());
+    bytes[8..].copy_from_slice(&hash(&format!("htpc-control-{kind}-b")).to_be_bytes());
     bytes[6] = (bytes[6] & 0x0f) | 0x50;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     format_uuid(bytes)
@@ -792,13 +823,61 @@ mod tests {
     fn escapes_last_change_twice() {
         let change = last_change("urn:x", &[("AVTransportURI", "http://h/a?b=1&c=2".into())]);
         assert!(change.contains("val=\"http://h/a?b=1&amp;c=2\""));
-        let set = property_set(&[("LastChange".into(), change)]);
+        let set = property_set(&[("LastChange", change)]);
         assert!(set.contains("&lt;Event") && set.contains("&amp;amp;c=2"));
     }
 
     #[test]
+    fn reports_the_transport_state() {
+        let playing = Status {
+            source: Source::Url,
+            state: PlayState::Playing,
+            ..Status::default()
+        };
+        let idle = Status::default();
+        let empty = Renderer::default();
+        assert_eq!(empty.transport_state(&idle), TransportState::NoMediaPresent);
+        assert_eq!(empty.transport_state(&playing), TransportState::Playing);
+
+        let set = Renderer {
+            uri: "http://h/a.mkv".into(),
+            set_since: Some(Instant::now()),
+            ..Renderer::default()
+        };
+        assert_eq!(set.transport_state(&playing), TransportState::Stopped);
+
+        let starting = Renderer {
+            uri: "http://h/a.mkv".into(),
+            started: true,
+            starting_since: Some(Instant::now()),
+            ..Renderer::default()
+        };
+        assert_eq!(
+            starting.transport_state(&idle),
+            TransportState::Transitioning
+        );
+        assert_eq!(TransportState::Stopped.actions(), "Play");
+    }
+
+    #[test]
+    fn knows_audio_items_by_their_class() {
+        let item = |class: &str| {
+            format!(
+                "<DIDL-Lite xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\"><item>\
+                 <upnp:class>{class}</upnp:class></item></DIDL-Lite>"
+            )
+        };
+        assert!(is_audio_item(&item("object.item.audioItem.musicTrack")));
+        assert!(is_audio_item(&item("object.item.audioItem")));
+        assert!(!is_audio_item(&item("object.item.videoItem.movie")));
+        assert!(!is_audio_item(""));
+        assert!(!is_audio_item("not xml"));
+    }
+
+    #[test]
     fn keeps_the_udn() {
-        assert_eq!(stable_uuid(), stable_uuid());
+        assert_eq!(stable_uuid("dlna"), stable_uuid("dlna"));
+        assert_ne!(stable_uuid("dlna"), stable_uuid("dial"));
         assert_ne!(random_uuid(), random_uuid());
     }
 }

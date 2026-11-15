@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Written by the component airplay of x86-linux-htpc.
+[Unit]
+Description=AirPlay receiver for audio and screen mirroring (x86-linux-htpc)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+# The mirroring window opens in the Plasma session, so this is a user
+# service of that session and not a system service.
+ExecStart=/usr/bin/uxplay -rc %h/.config/x86-linux-htpc/uxplay.conf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

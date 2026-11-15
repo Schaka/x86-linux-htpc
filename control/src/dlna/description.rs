@@ -7,9 +7,6 @@
 use super::xml::escape;
 
 pub const DEVICE_TYPE: &str = "urn:schemas-upnp-org:device:MediaRenderer:1";
-pub const AV_TRANSPORT: &str = "urn:schemas-upnp-org:service:AVTransport:1";
-pub const RENDERING_CONTROL: &str = "urn:schemas-upnp-org:service:RenderingControl:1";
-pub const CONNECTION_MANAGER: &str = "urn:schemas-upnp-org:service:ConnectionManager:1";
 
 /// The formats that the players take. mpv plays nearly all formats, so the
 /// list starts with the wildcard, and names the common formats for control
@@ -19,17 +16,54 @@ http-get:*:video/webm:*,http-get:*:video/mpeg:*,http-get:*:video/mp2t:*,http-get
 http-get:*:application/vnd.apple.mpegurl:*,http-get:*:audio/mpeg:*,http-get:*:audio/flac:*,\
 http-get:*:audio/mp4:*,http-get:*:audio/ogg:*,http-get:*:audio/wav:*";
 
-/// The short name of a service in the paths, and its type
-pub const SERVICES: [(&str, &str); 3] = [
-    ("AVTransport", AV_TRANSPORT),
-    ("RenderingControl", RENDERING_CONTROL),
-    ("ConnectionManager", CONNECTION_MANAGER),
-];
+/// The UPnP services of the renderer
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Service {
+    AvTransport,
+    RenderingControl,
+    ConnectionManager,
+}
+
+impl Service {
+    pub const ALL: [Service; 3] = [
+        Service::AvTransport,
+        Service::RenderingControl,
+        Service::ConnectionManager,
+    ];
+
+    /// The short name of the service in the paths and in the service ID
+    pub fn name(self) -> &'static str {
+        match self {
+            Service::AvTransport => "AVTransport",
+            Service::RenderingControl => "RenderingControl",
+            Service::ConnectionManager => "ConnectionManager",
+        }
+    }
+
+    /// The service type
+    pub fn urn(self) -> &'static str {
+        match self {
+            Service::AvTransport => "urn:schemas-upnp-org:service:AVTransport:1",
+            Service::RenderingControl => "urn:schemas-upnp-org:service:RenderingControl:1",
+            Service::ConnectionManager => "urn:schemas-upnp-org:service:ConnectionManager:1",
+        }
+    }
+
+    /// The service description (SCPD)
+    pub fn description(self) -> String {
+        match self {
+            Service::AvTransport => av_transport(),
+            Service::RenderingControl => rendering_control(),
+            Service::ConnectionManager => connection_manager(),
+        }
+    }
+}
 
 pub fn device(name: &str, udn: &str) -> String {
-    let services: String = SERVICES
+    let services: String = Service::ALL
         .iter()
-        .map(|(short, kind)| {
+        .map(|service| {
+            let (short, kind) = (service.name(), service.urn());
             format!(
                 "<service><serviceType>{kind}</serviceType><serviceId>urn:upnp-org:serviceId:{short}</serviceId>\
                  <SCPDURL>/dlna/{short}.xml</SCPDURL><controlURL>/dlna/{short}/control</controlURL>\
@@ -135,7 +169,7 @@ fn scpd(actions: &[Action], variables: &[Variable]) -> String {
 
 const INSTANCE: (&str, bool, &str) = ("InstanceID", false, "A_ARG_TYPE_InstanceID");
 
-pub fn av_transport() -> String {
+fn av_transport() -> String {
     let actions: &[Action] = &[
         (
             "SetAVTransportURI",
@@ -264,12 +298,12 @@ pub fn av_transport() -> String {
 /// renderer, and shows a volume or sound mode control for each action that
 /// it finds. With passthrough, the AV receiver has the volume, so the
 /// renderer offers none.
-pub fn rendering_control() -> String {
+fn rendering_control() -> String {
     let variables = [evented("LastChange"), var("A_ARG_TYPE_InstanceID", "ui4")];
     scpd(&[], &variables)
 }
 
-pub fn connection_manager() -> String {
+fn connection_manager() -> String {
     let actions: &[Action] = &[
         (
             "GetProtocolInfo",

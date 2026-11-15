@@ -7,13 +7,14 @@
 //! So the app keeps running when this service restarts.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
 use tokio::process::Command;
 use utoipa::ToSchema;
 
 use crate::config::Config;
-use crate::error::{ApiError, Result};
+use crate::error::{Error, Result};
 
 pub const YOUTUBE_ENTRY: &str = "htpc-youtube-tv.desktop";
 pub const KODI_ENTRY: &str = "htpc-kodi.desktop";
@@ -81,25 +82,13 @@ pub fn app_id(desktop_id: &str) -> String {
 }
 
 pub fn list(config: &Config) -> Vec<App> {
-    let mut ids = config.home_screen_apps.clone();
-    if ids.is_empty() {
-        ids = vec![
-            JELLYFIN_ENTRY.into(),
-            YOUTUBE_ENTRY.into(),
-            KODI_ENTRY.into(),
-        ];
-        let mut android: Vec<String> =
-            std::fs::read_dir(config.home.join(".local/share/applications"))
-                .into_iter()
-                .flatten()
-                .flatten()
-                .filter_map(|e| e.file_name().into_string().ok())
-                .filter(|n| n.starts_with(ANDROID_PREFIX) && n.ends_with(".desktop"))
-                .collect();
-        android.sort();
-        ids.extend(android);
-    }
-    ids.into_iter()
+    let desktop_ids = if config.home_screen_apps.is_empty() {
+        default_desktop_ids(&config.home)
+    } else {
+        config.home_screen_apps.clone()
+    };
+    desktop_ids
+        .into_iter()
         .filter_map(|desktop_id| {
             let keys = read_entry(&find_entry(&config.home, &desktop_id)?)?;
             Some(App {
@@ -108,6 +97,23 @@ pub fn list(config: &Config) -> Vec<App> {
                 desktop_id,
             })
         })
+        .collect()
+}
+
+/// The players first, then the Android apps of the component android-apps
+fn default_desktop_ids(home: &Path) -> Vec<String> {
+    let mut android: Vec<String> = std::fs::read_dir(home.join(".local/share/applications"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.starts_with(ANDROID_PREFIX) && name.ends_with(".desktop"))
+        .collect();
+    android.sort();
+    [JELLYFIN_ENTRY, YOUTUBE_ENTRY, KODI_ENTRY]
+        .into_iter()
+        .map(String::from)
+        .chain(android)
         .collect()
 }
 
@@ -120,30 +126,30 @@ pub fn find(config: &Config, id: &str) -> Option<App> {
 /// Starts a desktop entry. The files take the place of the field codes
 /// %f, %F, %u and %U.
 pub async fn launch(config: &Config, desktop_id: &str, files: &[String]) -> Result<()> {
-    let path = find_entry(&config.home, desktop_id).ok_or_else(|| {
-        ApiError::not_installed(format!("The app {desktop_id} is not installed."))
-    })?;
+    let path = find_entry(&config.home, desktop_id)
+        .ok_or_else(|| Error::not_installed(format!("The app {desktop_id} is not installed.")))?;
     let keys = read_entry(&path)
-        .ok_or_else(|| ApiError::not_installed(format!("Cannot read {}.", path.display())))?;
+        .ok_or_else(|| Error::not_installed(format!("Cannot read {}.", path.display())))?;
     let exec = entry_value(&keys, "Exec")
-        .ok_or_else(|| ApiError::not_installed(format!("{desktop_id} has no Exec line.")))?;
+        .ok_or_else(|| Error::not_installed(format!("{desktop_id} has no Exec line.")))?;
     let argv = expand_exec(&exec, files);
     if argv.is_empty() {
-        return Err(ApiError::not_installed(format!(
+        return Err(Error::not_installed(format!(
             "{desktop_id} has an empty Exec line."
         )));
     }
-    run_detached(&format!("app-htpc-control-{}", app_id(desktop_id)), &argv)
-        .await
-        .map(|_| ())
+    run_detached(&format!("app-htpc-control-{}", app_id(desktop_id)), &argv).await
 }
 
-/// Runs a program as a transient user service, and returns the name of
-/// the service.
-pub async fn run_detached(unit_prefix: &str, argv: &[String]) -> Result<String> {
+/// Runs a program as a transient user service. The process ID and a
+/// counter make the name of the service unique, also after a restart of
+/// this service.
+pub async fn run_detached(unit_prefix: &str, argv: &[String]) -> Result<()> {
+    static STARTS: AtomicU64 = AtomicU64::new(0);
     let unit = format!(
-        "{unit_prefix}-{}",
-        std::process::id() as u64 * 1000 + unique()
+        "{unit_prefix}-{}-{}",
+        std::process::id(),
+        STARTS.fetch_add(1, Ordering::Relaxed)
     );
     let output = Command::new("systemd-run")
         .args(["--user", "--collect", "--quiet", "--unit", &unit, "--"])
@@ -151,40 +157,46 @@ pub async fn run_detached(unit_prefix: &str, argv: &[String]) -> Result<String> 
         .output()
         .await?;
     if !output.status.success() {
-        return Err(ApiError::backend(format!(
+        return Err(Error::player(format!(
             "systemd-run failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
     tracing::info!("started {}", argv.join(" "));
-    Ok(unit)
+    Ok(())
 }
 
-fn unique() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    COUNTER.fetch_add(1, Ordering::Relaxed) % 1000
-}
-
-/// Splits an Exec value into arguments, with the quoting rules of the
-/// desktop entry specification, and fills in the field codes.
+/// Splits an Exec value into arguments and fills in the field codes.
 fn expand_exec(exec: &str, files: &[String]) -> Vec<String> {
+    let mut argv = Vec::new();
+    for word in split_exec(exec) {
+        match word.as_str() {
+            "%f" | "%u" => argv.extend(files.first().cloned()),
+            "%F" | "%U" => argv.extend(files.iter().cloned()),
+            // The codes for the icon, the name and the file of the entry.
+            // The players need none of them.
+            "%i" | "%c" | "%k" | "%d" | "%D" | "%n" | "%N" | "%v" | "%m" => {}
+            _ => argv.push(word.replace("%%", "%")),
+        }
+    }
+    argv
+}
+
+/// The words of an Exec value, with the quoting rules of the desktop entry
+/// specification. A pair of quotes without text is an empty argument.
+fn split_exec(exec: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut word = String::new();
     let mut in_word = false;
     let mut quoted = false;
-    let mut chars = exec.chars().peekable();
+    let mut chars = exec.chars();
     while let Some(c) = chars.next() {
         match c {
             '"' => {
                 quoted = !quoted;
                 in_word = true;
             }
-            '\\' if quoted => {
-                if let Some(next) = chars.next() {
-                    word.push(next);
-                }
-            }
+            '\\' if quoted => word.extend(chars.next()),
             c if c.is_whitespace() && !quoted => {
                 if in_word {
                     words.push(std::mem::take(&mut word));
@@ -200,16 +212,7 @@ fn expand_exec(exec: &str, files: &[String]) -> Vec<String> {
     if in_word {
         words.push(word);
     }
-    let mut argv = Vec::new();
-    for word in words {
-        match word.as_str() {
-            "%f" | "%u" => argv.extend(files.first().cloned()),
-            "%F" | "%U" => argv.extend(files.iter().cloned()),
-            "%i" | "%c" | "%k" | "%d" | "%D" | "%n" | "%N" | "%v" | "%m" => {}
-            _ => argv.push(word.replace("%%", "%")),
-        }
-    }
-    argv
+    words
 }
 
 #[cfg(test)]
@@ -226,6 +229,10 @@ mod tests {
         assert_eq!(
             expand_exec("app --name \"two words\" %i", &[]),
             vec!["app", "--name", "two words"]
+        );
+        assert_eq!(
+            expand_exec("app \"\" --x=100%% %f", &[]),
+            vec!["app", "", "--x=100%"]
         );
         assert_eq!(
             expand_exec("android-app com.example", &[]),

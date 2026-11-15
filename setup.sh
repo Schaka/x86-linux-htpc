@@ -69,6 +69,7 @@ CB1_BUILD_DIR|The folder for the archives of the CB1 build and of Kodi.|/var/tmp
 KERNEL_PACKAGES_DIR|The folder for the packages of the patched kernel.|/var/tmp/htpc-kernel|
 SETUP_HOME_ASSISTANT|Does a Home Assistant server control the TV? The setup then shows the guide docs/home-assistant.md.|no|yes no
 SETUP_CONTROL|Run the control API and the DLNA renderer? Home Assistant and the DLNA apps of the network can then start media on the HTPC and control it.|yes|yes no
+SETUP_AIRPLAY|Run an AirPlay receiver? iPhones and Macs can then play audio and mirror the screen on the TV.|no|yes no
 SETUP_CEC|Is a USB-CEC adapter connected? The setup then shows the guide docs/cec.md.|no|yes no
 LIST
 }
@@ -224,6 +225,7 @@ earlier_choice() {
 	SETUP_KODI) has kodi-dv ;;
 	SETUP_YOUTUBE) has youtube-tv ;;
 	SETUP_CONTROL) has control-api ;;
+	SETUP_AIRPLAY) has airplay ;;
 	SETUP_REMOTE) [[ "$(has remote-keys)" == yes ]] && printf 'air-mouse\n' || printf 'keyboard\n' ;;
 	SETUP_AV_RECEIVER) [[ " $(config_get AUDIO_PASSTHROUGH_FORMATS) " == *" truehd "* ]] && printf 'yes\n' || printf 'no\n' ;;
 	*) return 1 ;;
@@ -326,6 +328,7 @@ plan_install() {
 	[[ "${answer[SETUP_REMOTE]}" == air-mouse && -n "${answer[AIR_MOUSE_USB_IDS]}" ]] && list+=(remote-keys)
 	[[ -n "${answer[WAKE_ON_LAN_MACS]}" ]] && list+=(network-wake)
 	[[ "${answer[SETUP_CONTROL]}" == yes ]] && list+=(control-api)
+	[[ "${answer[SETUP_AIRPLAY]}" == yes ]] && list+=(airplay)
 	app="$(browser_entry || true)"
 	[[ -n "${app}" ]] && apps+=("${app}")
 	list+=(home-screen)
@@ -402,6 +405,8 @@ next_steps() {
 		printf -- '- Home Assistant: read docs/home-assistant.md.\n'
 	[[ "${answer[SETUP_CONTROL]}" == yes ]] &&
 		printf -- '- Control API: read docs/control-api.md. Home Assistant finds the DLNA renderer by itself.\n'
+	[[ "${answer[SETUP_AIRPLAY]}" == yes ]] &&
+		printf -- '- AirPlay: read docs/airplay.md. The receiver shows in the AirPlay list of iPhones and Macs on the same network.\n'
 	[[ "${answer[SETUP_CEC]}" == yes ]] &&
 		printf -- '- CEC: the project has no CEC component yet. Read docs/cec.md.\n'
 	[[ -n "${answer[ANDROID_APPS]}" ]] &&

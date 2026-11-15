@@ -42,6 +42,7 @@ The setup shows a default for each question. Press Enter to take it. `./setup.sh
 | `WAKE_ON_LAN_MACS` | The TV turns on at login and at each video |
 | `SETUP_BUILD` | Build the CB1, Kodi and kernel packages now |
 | `SETUP_CONTROL` | The control API and DLNA renderer for Home Assistant and phones ([control-api.md](control-api.md)). Default `yes`. |
+| `SETUP_AIRPLAY` | The AirPlay receiver for iPhones and Macs ([airplay.md](airplay.md)). Default `no`. |
 | `SETUP_HOME_ASSISTANT`, `SETUP_CEC` | The setup then names the guides at the end |
 
 The setup writes `/etc/x86-linux-htpc/htpc.conf`. At the end, it runs the checks of all components and shows the next steps. On the first run, some checks fail, because the Jellyfin login and the first session of the TV user do not exist yet. Then `setup.sh` ends with the exit code 1. The next steps fix these checks. The key `COMPONENTS` in this file lists the components that the answers need. `htpc.conf.example` explains each key.

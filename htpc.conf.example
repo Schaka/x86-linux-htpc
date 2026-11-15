@@ -121,9 +121,17 @@ CONTROL_API_PORT=8780
 # DLNA apps of phones find the HTPC through it.
 CONTROL_DLNA=yes
 
+# The DIAL launcher of the control API: yes or no. The YouTube app of a phone
+# then finds the HTPC, also while VacuumTube is closed, and starts VacuumTube.
+CONTROL_DIAL=yes
+
 # The name of the HTPC in Home Assistant and in the DLNA apps. Empty: the
 # value of JELLYFIN_PLAYER_NAME, or else the host name.
 CONTROL_NAME=
+
+# The name of the AirPlay receiver in the AirPlay list of an iPhone or a Mac.
+# The component airplay reads it. Empty: the host name.
+AIRPLAY_NAME=
 
 # The folder of control/build.sh. If it has the program htpc-control, the
 # component control-api installs it. Otherwise the component downloads the

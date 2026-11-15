@@ -1,90 +1,98 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-use axum::Json;
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
-use serde::Serialize;
-use utoipa::ToSchema;
+//! The error of the controller and the players. The REST API and the DLNA
+//! renderer each turn the kind into their own error answer.
 
-/// The answer of the API to a failed request
-#[derive(Debug, Serialize, ToSchema)]
-pub struct ErrorBody {
-    /// A fixed code for scripts, for example not_installed
-    pub error: String,
+use std::fmt;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// The request has a value that is not valid
+    BadRequest,
+    NotFound,
+    /// The app or component for the request is not installed
+    NotInstalled,
+    /// The player or its server does not answer
+    Offline,
+    /// The request needs media that plays
+    NothingPlays,
+    /// The player refused the command or failed
+    Player,
+}
+
+impl ErrorKind {
+    /// The fixed code for scripts in the answer of the API
+    pub fn code(self) -> &'static str {
+        match self {
+            ErrorKind::BadRequest => "bad_request",
+            ErrorKind::NotFound => "not_found",
+            ErrorKind::NotInstalled => "not_installed",
+            ErrorKind::Offline => "offline",
+            ErrorKind::NothingPlays => "nothing_plays",
+            ErrorKind::Player => "player_error",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Error {
+    pub kind: ErrorKind,
     /// A sentence for a person
     pub message: String,
 }
 
-#[derive(Debug)]
-pub struct ApiError {
-    pub status: StatusCode,
-    pub code: &'static str,
-    pub message: String,
-}
+pub type Result<T> = std::result::Result<T, Error>;
 
-pub type Result<T> = std::result::Result<T, ApiError>;
-
-impl ApiError {
-    pub fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> ApiError {
-        ApiError {
-            status,
-            code,
+impl Error {
+    pub fn new(kind: ErrorKind, message: impl Into<String>) -> Error {
+        Error {
+            kind,
             message: message.into(),
         }
     }
 
-    pub fn bad_request(message: impl Into<String>) -> ApiError {
-        ApiError::new(StatusCode::BAD_REQUEST, "bad_request", message)
+    pub fn bad_request(message: impl Into<String>) -> Error {
+        Error::new(ErrorKind::BadRequest, message)
     }
 
-    pub fn not_found(message: impl Into<String>) -> ApiError {
-        ApiError::new(StatusCode::NOT_FOUND, "not_found", message)
+    pub fn not_found(message: impl Into<String>) -> Error {
+        Error::new(ErrorKind::NotFound, message)
     }
 
-    pub fn not_installed(message: impl Into<String>) -> ApiError {
-        ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "not_installed", message)
+    pub fn not_installed(message: impl Into<String>) -> Error {
+        Error::new(ErrorKind::NotInstalled, message)
     }
 
-    pub fn offline(message: impl Into<String>) -> ApiError {
-        ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "offline", message)
+    pub fn offline(message: impl Into<String>) -> Error {
+        Error::new(ErrorKind::Offline, message)
     }
 
-    pub fn nothing_plays() -> ApiError {
-        ApiError::new(
-            StatusCode::CONFLICT,
-            "nothing_plays",
-            "No player plays media.",
-        )
+    pub fn nothing_plays() -> Error {
+        Error::new(ErrorKind::NothingPlays, "No player plays media.")
     }
 
-    pub fn backend(message: impl Into<String>) -> ApiError {
-        ApiError::new(StatusCode::BAD_GATEWAY, "player_error", message)
+    pub fn player(message: impl Into<String>) -> Error {
+        Error::new(ErrorKind::Player, message)
     }
 }
 
-impl From<reqwest::Error> for ApiError {
-    fn from(error: reqwest::Error) -> ApiError {
-        ApiError::backend(format!("Jellyfin request failed: {error}"))
+/// Only the Jellyfin client uses `?` on reqwest errors. The other HTTP
+/// clients map their errors to a message of their own.
+impl From<reqwest::Error> for Error {
+    fn from(error: reqwest::Error) -> Error {
+        Error::player(format!("Jellyfin request failed: {error}"))
     }
 }
 
-impl From<std::io::Error> for ApiError {
-    fn from(error: std::io::Error) -> ApiError {
-        ApiError::backend(error.to_string())
+impl From<std::io::Error> for Error {
+    fn from(error: std::io::Error) -> Error {
+        Error::player(error.to_string())
     }
 }
 
-impl std::fmt::Display for ApiError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} ({})", self.message, self.code)
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ({})", self.message, self.kind.code())
     }
 }
 
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        let body = ErrorBody {
-            error: self.code.to_string(),
-            message: self.message,
-        };
-        (self.status, Json(body)).into_response()
-    }
-}
+impl std::error::Error for Error {}

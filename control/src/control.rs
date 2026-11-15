@@ -6,6 +6,8 @@
 //! whole screen on their own VT, so a new start first stops the media of
 //! the other players and ends Kodi.
 
+use std::future::Future;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,17 +18,23 @@ use utoipa::ToSchema;
 
 use crate::apps::{self, App, KODI_ENTRY, YOUTUBE_ENTRY};
 use crate::config::Config;
-use crate::error::{ApiError, Result};
-use crate::jellyfin::Jellyfin;
-use crate::mpv::Mpv;
+use crate::desktop;
+use crate::error::{Error, Result};
+use crate::players::jellyfin::{self, Jellyfin, PlayCommand};
+use crate::players::kodi;
+use crate::players::mpv::{MediaKind, Mpv};
+use crate::players::youtube::{self, Youtube};
 use crate::status::{PlayState, Running, Source, Status};
-use crate::{kodi, youtube};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
+const CONDITION_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 const WAKE: &str = "/usr/local/libexec/x86-linux-htpc/wake-devices";
 const VACUUMTUBE: &str = "rocks.shy.VacuumTube";
+const URL_SCHEMES: [&str; 6] = ["http", "https", "rtsp", "rtmp", "smb", "nfs"];
 /// Kodi needs this long to start and to load its add-ons.
 const KODI_START_TIMEOUT: Duration = Duration::from_secs(40);
+/// The JSON-RPC interface of Kodi starts before the add-ons.
+const KODI_ADDON_START: Duration = Duration::from_secs(3);
 const KODI_EXIT_TIMEOUT: Duration = Duration::from_secs(15);
 /// After Kodi ends, its launcher switches back to Plasma and shows the
 /// home screen. An app that starts before that is hidden by the home screen.
@@ -45,9 +53,19 @@ pub enum JellyfinPlayer {
     Kodi,
 }
 
+impl JellyfinPlayer {
+    pub fn source(self) -> Source {
+        match self {
+            JellyfinPlayer::Shim => Source::Jellyfin,
+            JellyfinPlayer::Kodi => Source::Kodi,
+        }
+    }
+}
+
 pub struct Controller {
     pub config: Config,
-    jellyfin: Arc<Jellyfin>,
+    jellyfin: Jellyfin,
+    youtube: Youtube,
     mpv: Mpv,
     status: watch::Sender<Status>,
     refresh: Notify,
@@ -57,21 +75,33 @@ pub struct Controller {
 
 impl Controller {
     pub fn new(config: Config) -> Arc<Controller> {
-        let http = reqwest::Client::builder()
-            .build()
-            .expect("the HTTP client starts");
+        let mpv = Mpv::new(&config);
+        Controller::with_mpv(config, mpv)
+    }
+
+    /// A controller with this mpv. The tests use a mpv that starts no program.
+    pub fn with_mpv(config: Config, mpv: Mpv) -> Arc<Controller> {
+        let http = reqwest::Client::new();
         Arc::new(Controller {
-            jellyfin: Arc::new(Jellyfin::new(http, &config.home)),
-            mpv: Mpv::new(&config),
+            jellyfin: Jellyfin::new(http.clone(), &config.home),
+            youtube: Youtube::new(http),
+            mpv,
             config,
-            status: watch::channel(Status::idle(Running::default())).0,
+            status: watch::channel(Status::default()).0,
             refresh: Notify::new(),
             starting: Mutex::new(()),
         })
     }
 
+    /// The state of the last poll
     pub fn status(&self) -> Status {
         self.status.borrow().clone()
+    }
+
+    /// Sets the state, as the poll does. The tests use it.
+    #[cfg(test)]
+    pub fn publish_status(&self, status: Status) {
+        self.status.send_replace(status);
     }
 
     pub fn subscribe(&self) -> watch::Receiver<Status> {
@@ -85,16 +115,20 @@ impl Controller {
         status
     }
 
+    /// Reads the players every POLL_INTERVAL, and at once after a command.
     pub async fn poll_forever(self: Arc<Self>) {
         loop {
             self.refresh_now().await;
             tokio::select! {
-                _ = tokio::time::sleep(POLL_INTERVAL) => {}
-                _ = self.refresh.notified() => {}
+                () = tokio::time::sleep(POLL_INTERVAL) => {}
+                () = self.refresh.notified() => {}
             }
         }
     }
 
+    /// The first player in this order that has media: Kodi and the mpv of
+    /// this service take the whole screen, so they are in front of the
+    /// shim and VacuumTube.
     async fn read_players(&self) -> Status {
         let running = Running {
             youtube: youtube::running().await,
@@ -102,22 +136,24 @@ impl Controller {
         };
         let mut found = None;
         if running.kodi {
-            found = kodi::status().await.unwrap_or_else(log_none);
+            found = kodi::status().await.unwrap_or_else(log_no_status);
         }
         if found.is_none() {
             found = self.mpv.status().await;
         }
         if found.is_none() {
-            found = self.jellyfin.status().await.unwrap_or_else(log_none);
+            found = self.jellyfin.status().await.unwrap_or_else(log_no_status);
         }
         if found.is_none() && running.youtube {
-            found = youtube::status().await.unwrap_or_else(log_none);
+            found = self.youtube.status().await.unwrap_or_else(log_no_status);
         }
-        let mut status = found.unwrap_or_else(|| Status::idle(running.clone()));
-        status.running = running;
-        status
+        Status {
+            running,
+            ..found.unwrap_or_default()
+        }
     }
 
+    /// Makes the poll read the players at once.
     fn changed(&self) {
         self.refresh.notify_one();
     }
@@ -137,33 +173,41 @@ impl Controller {
         }
         match status.source {
             Source::Jellyfin if keep != Source::Jellyfin => {
-                self.jellyfin.command("Stop").await?;
+                self.jellyfin.command(PlayCommand::Stop).await?;
                 tokio::time::sleep(SCREEN_HANDOVER).await;
             }
-            Source::Youtube if keep != Source::Youtube => youtube::pause().await?,
+            Source::Youtube if keep != Source::Youtube => self.youtube.pause().await?,
             _ => {}
         }
         Ok(())
     }
 
+    /// Starts VacuumTube without a video, for a launch request of DIAL.
+    /// The other players make room first, as for a video.
+    pub async fn start_youtube_app(&self) -> Result<()> {
+        let _guard = self.starting.lock().await;
+        self.make_room(Source::Youtube).await?;
+        apps::launch(&self.config, YOUTUBE_ENTRY, &[]).await?;
+        self.changed();
+        Ok(())
+    }
+
     pub async fn play_youtube(&self, video_id: &str, start: Option<f64>) -> Result<()> {
         if !youtube::valid_video_id(video_id) {
-            return Err(ApiError::bad_request(format!(
+            return Err(Error::bad_request(format!(
                 "{video_id} is not a YouTube video ID."
             )));
         }
         let _guard = self.starting.lock().await;
         self.make_room(Source::Youtube).await?;
-        apps::launch(
-            &self.config,
-            YOUTUBE_ENTRY,
-            &[youtube::watch_url(video_id, start)],
-        )
-        .await?;
+        let address = youtube::watch_url(video_id, start);
+        apps::launch(&self.config, YOUTUBE_ENTRY, &[address]).await?;
         self.changed();
         Ok(())
     }
 
+    /// Plays a Jellyfin item. Without `start`, `resume` starts at the
+    /// resume position of the Jellyfin user of the player.
     pub async fn play_jellyfin(
         &self,
         item_id: &str,
@@ -171,37 +215,26 @@ impl Controller {
         resume: bool,
         player: JellyfinPlayer,
     ) -> Result<()> {
-        if item_id.is_empty() || !item_id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
-            return Err(ApiError::bad_request(format!(
+        if !jellyfin::valid_item_id(item_id) {
+            return Err(Error::bad_request(format!(
                 "{item_id} is not a Jellyfin item ID."
             )));
         }
         let _guard = self.starting.lock().await;
-        let start = match (start, player) {
-            (Some(start), _) => Some(start),
-            (None, _) if !resume => None,
-            (None, JellyfinPlayer::Shim) => self.jellyfin.resume_position(item_id).await?,
-            (None, JellyfinPlayer::Kodi) => self.jellyfin.kodi_resume_position(item_id).await?,
-        };
-        match player {
-            JellyfinPlayer::Shim => {
-                self.make_room(Source::Jellyfin).await?;
-                self.jellyfin.play(item_id, start).await?;
+        let start = match (start, resume, player) {
+            (Some(start), _, _) => Some(start),
+            (None, false, _) => None,
+            (None, true, JellyfinPlayer::Shim) => self.jellyfin.resume_position(item_id).await?,
+            (None, true, JellyfinPlayer::Kodi) => {
+                self.jellyfin.kodi_resume_position(item_id).await?
             }
+        };
+        self.make_room(player.source()).await?;
+        match player {
+            JellyfinPlayer::Shim => self.jellyfin.play(item_id, start).await?,
             JellyfinPlayer::Kodi => {
-                self.make_room(Source::Kodi).await?;
                 self.start_kodi().await?;
-                // The add-on starts at the position of the parameter
-                // timestamp, in seconds. Without it, the add-on starts at
-                // the beginning.
-                let mut file = format!(
-                    "plugin://plugin.video.jellyfin/?mode=play&id={}",
-                    item_id.replace('-', "")
-                );
-                if let Some(start) = start.filter(|s| *s >= 1.0) {
-                    file.push_str(&format!("&timestamp={}", start as u64));
-                }
-                kodi::open(&file).await?;
+                kodi::open(&kodi::jellyfin_addon_file(item_id, start)).await?;
             }
         }
         self.changed();
@@ -220,34 +253,34 @@ impl Controller {
         })
         .await;
         if !ready {
-            return Err(ApiError::backend("Kodi did not start in time."));
+            return Err(Error::player("Kodi did not start in time."));
         }
-        // The JSON-RPC interface starts before the add-ons.
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        tokio::time::sleep(KODI_ADDON_START).await;
         Ok(())
     }
 
     /// Plays a media address in the player that fits it: a YouTube address
     /// in VacuumTube, a stream of the Jellyfin server in the shim, and all
-    /// other addresses in mpv.
-    pub async fn play_url(&self, address: &str, title: Option<&str>) -> Result<Source> {
+    /// other addresses in mpv. `audio` says that the address is audio, for
+    /// example by the class of a DLNA item. The extension of the address
+    /// also decides it.
+    pub async fn play_url(
+        &self,
+        address: &str,
+        title: Option<&str>,
+        audio: bool,
+    ) -> Result<Source> {
         let url = Url::parse(address)
-            .map_err(|_| ApiError::bad_request(format!("{address} is not an address.")))?;
-        if !matches!(
-            url.scheme(),
-            "http" | "https" | "rtsp" | "rtmp" | "smb" | "nfs"
-        ) {
-            return Err(ApiError::bad_request(format!(
+            .map_err(|_| Error::bad_request(format!("{address} is not an address.")))?;
+        if !URL_SCHEMES.contains(&url.scheme()) {
+            return Err(Error::bad_request(format!(
                 "The scheme {} is not allowed.",
                 url.scheme()
             )));
         }
         if let Some(video_id) = youtube::video_id_from_url(&url) {
-            let start = url
-                .query_pairs()
-                .find(|(k, _)| k == "t")
-                .and_then(|(_, t)| t.trim_end_matches('s').parse().ok());
-            self.play_youtube(&video_id, start).await?;
+            self.play_youtube(&video_id, youtube::start_from_url(&url))
+                .await?;
             return Ok(Source::Youtube);
         }
         if let Some(item_id) = self.jellyfin.item_id_from_url(&url) {
@@ -257,14 +290,16 @@ impl Controller {
         }
         let _guard = self.starting.lock().await;
         self.make_room(Source::Url).await?;
-        self.mpv.play(address, title).await?;
+        self.mpv
+            .play(address, title, MediaKind::of(&url, audio))
+            .await?;
         self.changed();
         Ok(Source::Url)
     }
 
     pub async fn launch_app(&self, id: &str) -> Result<App> {
         let app = apps::find(&self.config, id)
-            .ok_or_else(|| ApiError::not_found(format!("No app has the name {id}.")))?;
+            .ok_or_else(|| Error::not_found(format!("No app has the name {id}.")))?;
         let _guard = self.starting.lock().await;
         let keep = match app.desktop_id.as_str() {
             YOUTUBE_ENTRY => Source::Youtube,
@@ -277,41 +312,29 @@ impl Controller {
         Ok(app)
     }
 
-    async fn playing_source(&self) -> Result<Source> {
-        match self.refresh_now().await.source {
-            Source::Idle => Err(ApiError::nothing_plays()),
-            source => Ok(source),
-        }
-    }
-
     /// Some(true) pauses, Some(false) plays, None toggles.
     pub async fn set_paused(&self, paused: Option<bool>) -> Result<()> {
-        let source = self.playing_source().await?;
-        let state = self.status().state;
-        let paused = paused.unwrap_or(state != PlayState::Paused);
-        match source {
-            Source::Jellyfin => {
-                self.jellyfin
-                    .command(if paused { "Pause" } else { "Unpause" })
-                    .await?
-            }
-            Source::Youtube if paused => youtube::pause().await?,
-            Source::Youtube => youtube::resume().await?,
-            Source::Kodi => kodi::set_paused(Some(paused)).await?,
-            Source::Url => self.mpv.set_paused(Some(paused)).await?,
-            Source::Idle => unreachable!(),
+        let status = self.refresh_now().await;
+        let paused = paused.unwrap_or(status.state != PlayState::Paused);
+        match status.source {
+            Source::Idle => return Err(Error::nothing_plays()),
+            Source::Jellyfin => self.jellyfin.set_paused(paused).await?,
+            Source::Youtube => self.youtube.set_paused(paused).await?,
+            Source::Kodi => kodi::set_paused(paused).await?,
+            Source::Url => self.mpv.set_paused(paused).await?,
         }
         self.changed();
         Ok(())
     }
 
+    /// Stops the media. Kodi and VacuumTube keep running.
     pub async fn stop(&self) -> Result<()> {
-        match self.playing_source().await? {
-            Source::Jellyfin => self.jellyfin.command("Stop").await?,
-            Source::Youtube => youtube::stop().await?,
+        match self.refresh_now().await.source {
+            Source::Idle => return Err(Error::nothing_plays()),
+            Source::Jellyfin => self.jellyfin.command(PlayCommand::Stop).await?,
+            Source::Youtube => self.youtube.stop().await?,
             Source::Kodi => kodi::stop().await?,
             Source::Url => self.mpv.quit().await?,
-            Source::Idle => unreachable!(),
         }
         self.changed();
         Ok(())
@@ -319,16 +342,16 @@ impl Controller {
 
     pub async fn seek(&self, position: f64) -> Result<()> {
         if !position.is_finite() || position < 0.0 {
-            return Err(ApiError::bad_request(
+            return Err(Error::bad_request(
                 "The position must be 0 or more seconds.",
             ));
         }
-        match self.playing_source().await? {
+        match self.refresh_now().await.source {
+            Source::Idle => return Err(Error::nothing_plays()),
             Source::Jellyfin => self.jellyfin.seek(position).await?,
-            Source::Youtube => youtube::seek(position).await?,
+            Source::Youtube => self.youtube.seek(position).await?,
             Source::Kodi => kodi::seek(position).await?,
             Source::Url => self.mpv.seek(position).await?,
-            Source::Idle => unreachable!(),
         }
         self.changed();
         Ok(())
@@ -341,25 +364,22 @@ impl Controller {
         let _guard = self.starting.lock().await;
         self.make_room(Source::Idle).await?;
         if youtube::running().await {
-            let _ = tokio::process::Command::new("flatpak")
-                .args(["kill", VACUUMTUBE])
-                .status()
-                .await;
+            desktop::kill_flatpak(VACUUMTUBE).await;
         }
-        minimize_windows().await;
+        desktop::minimize_windows(&self.config.runtime_dir).await;
         self.changed();
         Ok(())
     }
 
     pub async fn wake_tv(&self) -> Result<()> {
-        if !std::path::Path::new(WAKE).exists() {
-            return Err(ApiError::not_installed(
+        if !Path::new(WAKE).exists() {
+            return Err(Error::not_installed(
                 "The component network-wake is not installed.",
             ));
         }
         let status = tokio::process::Command::new(WAKE).status().await?;
         if !status.success() {
-            return Err(ApiError::backend(
+            return Err(Error::player(
                 "The Wake-on-LAN sender failed. Read WAKE_ON_LAN_MACS in htpc.conf.",
             ));
         }
@@ -367,84 +387,25 @@ impl Controller {
     }
 }
 
-/// The KWin script of minimize_windows
-const MINIMIZE_SCRIPT: &str = "for (const w of workspace.windowList()) {
-    if (w.normalWindow && !w.minimized) w.minimized = true;
-}
-";
-
-/// Minimizes all app windows through a KWin script. The home screen of
-/// Plasma Bigscreen is the desktop, so it shows when no app window is open.
-/// The shortcut of the Home key toggles the home screen, and Bigscreen
-/// reports no state, so a toggle could hide the home screen instead.
-async fn minimize_windows() {
-    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    let path = runtime.join("htpc-control-home.js");
-    if std::fs::write(&path, MINIMIZE_SCRIPT).is_err() {
-        return;
-    }
-    let busctl = |args: Vec<String>| async move {
-        tokio::process::Command::new("busctl")
-            .arg("--user")
-            .args(args)
-            .output()
-            .await
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-    };
-    let name = "htpc-control-home".to_string();
-    let scripting = |method: &str| {
-        vec![
-            "call".to_string(),
-            "org.kde.KWin".into(),
-            "/Scripting".into(),
-            "org.kde.kwin.Scripting".into(),
-            method.into(),
-        ]
-    };
-    // A script of an earlier call with the same name blocks the load.
-    let mut unload = scripting("unloadScript");
-    unload.extend(["s".into(), name.clone()]);
-    busctl(unload.clone()).await;
-    let mut load = scripting("loadScript");
-    load.extend(["ss".into(), path.display().to_string(), name]);
-    let id = busctl(load)
-        .await
-        .and_then(|out| out.split_whitespace().nth(1).map(String::from))
-        .filter(|id| id.chars().all(|c| c.is_ascii_digit()));
-    if let Some(id) = id {
-        busctl(vec![
-            "call".into(),
-            "org.kde.KWin".into(),
-            format!("/Scripting/Script{id}"),
-            "org.kde.kwin.Script".into(),
-            "run".into(),
-        ])
-        .await;
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    busctl(unload).await;
-    let _ = std::fs::remove_file(path);
-}
-
-fn log_none<T>(error: ApiError) -> Option<T> {
+/// A player that does not answer counts as a player without media.
+fn log_no_status<T>(error: Error) -> Option<T> {
     tracing::debug!("player state: {error}");
     None
 }
 
+/// Checks the condition until it is true or the time is over. Returns
+/// false when the time is over.
 async fn wait_until<F, Fut>(timeout: Duration, mut condition: F) -> bool
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = bool>,
+    Fut: Future<Output = bool>,
 {
     let deadline = tokio::time::Instant::now() + timeout;
     while tokio::time::Instant::now() < deadline {
         if condition().await {
             return true;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(CONDITION_CHECK_INTERVAL).await;
     }
     false
 }

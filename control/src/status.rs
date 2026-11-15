@@ -5,10 +5,11 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 /// The player that shows the current media
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ToSchema)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Source {
     /// Nothing plays
+    #[default]
     Idle,
     /// jellyfin-mpv-shim
     Jellyfin,
@@ -20,9 +21,10 @@ pub enum Source {
     Url,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ToSchema)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum PlayState {
+    #[default]
     Idle,
     Playing,
     Paused,
@@ -30,7 +32,7 @@ pub enum PlayState {
     Buffering,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, ToSchema)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, ToSchema)]
 pub struct Status {
     pub source: Source,
     pub state: PlayState,
@@ -52,28 +54,13 @@ pub struct Status {
     pub running: Running,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, ToSchema)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, ToSchema)]
 pub struct Running {
     pub youtube: bool,
     pub kodi: bool,
 }
 
 impl Status {
-    pub fn idle(running: Running) -> Status {
-        Status {
-            source: Source::Idle,
-            state: PlayState::Idle,
-            title: None,
-            subtitle: None,
-            position: None,
-            duration: None,
-            media_id: None,
-            url: None,
-            image: None,
-            running,
-        }
-    }
-
     /// The same media and state, without the position. A DLNA event goes
     /// out only when this part changes.
     pub fn same_media_and_state(&self, other: &Status) -> bool {
@@ -82,6 +69,6 @@ impl Status {
             && self.title == other.title
             && self.media_id == other.media_id
             && self.url == other.url
-            && self.duration.map(|d| d.round()) == other.duration.map(|d| d.round())
+            && self.duration.map(f64::round) == other.duration.map(f64::round)
     }
 }

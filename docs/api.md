@@ -140,12 +140,13 @@ With `"player": "kodi"`, the answer is `{"source": "kodi"}`.
 
 ### `POST /api/v1/play/url`
 
-Plays a media address in the player that fits it. A YouTube address plays in VacuumTube. A stream address of the Jellyfin server of the shim plays the item in the shim. Each other address plays in mpv, with the options of the shim. The schemes `http`, `https`, `rtsp`, `rtmp`, `smb` and `nfs` are allowed.
+Plays a media address in the player that fits it. A YouTube address plays in VacuumTube. A stream address of the Jellyfin server of the shim plays the item in the shim. Each other address plays in mpv, with the options of the shim. An audio address plays in mpv without a picture. The schemes `http`, `https`, `rtsp`, `rtmp`, `smb` and `nfs` are allowed.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `url` | string | | The media address |
 | `title` | string | | The title that mpv shows and reports |
+| `audio` | boolean | `false` | `true` for an audio address without a known file extension. The service decides by the extension for `mp3`, `flac`, `m4a`, `aac`, `ogg`, `oga`, `opus`, `wav`, `wma`, `aiff` and `alac`. |
 
 ```bash
 curl -X POST http://HTPC:8780/api/v1/play/url \

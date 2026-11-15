@@ -28,12 +28,21 @@ renderer_answers() {
 	curl -fsS -m 5 "http://127.0.0.1:${port}/dlna/device.xml" | grep -q 'MediaRenderer'
 }
 
+dial_answers() {
+	curl -fsS -m 5 -i "http://127.0.0.1:${port}/dial/device.xml" | grep -qi '^Application-URL:'
+}
+
 check "The program htpc-control runs" program_runs
 check "The user service starts with the Plasma session" service_enabled
 check "The user service runs" service_active
 check "The API answers on port ${port}" api_answers
 if [[ "$(config_get CONTROL_DLNA yes)" == yes ]]; then
 	check "The DLNA renderer answers" renderer_answers
+fi
+
+# The service starts DIAL only when VacuumTube has its launcher entry.
+if [[ "$(config_get CONTROL_DIAL yes)" == yes && -f "${home}/.local/share/applications/htpc-youtube-tv.desktop" ]]; then
+	check "The DIAL launcher for VacuumTube answers" dial_answers
 fi
 
 checks_done

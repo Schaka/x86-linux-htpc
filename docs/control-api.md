@@ -24,6 +24,7 @@ If firewalld runs, the component opens the TCP port and SSDP in the default zone
 |---|---|---|
 | `CONTROL_API_PORT` | `8780` | The TCP port of the REST API and of the DLNA descriptions |
 | `CONTROL_DLNA` | `yes` | `no` turns the DLNA renderer off |
+| `CONTROL_DIAL` | `yes` | `no` turns the DIAL launcher for VacuumTube off |
 | `CONTROL_NAME` | `JELLYFIN_PLAYER_NAME`, else the host name | The name in Home Assistant and in the DLNA apps |
 | `CONTROL_BUILD_DIR` | `/var/tmp/htpc-control` | The folder of a local build |
 
@@ -78,7 +79,8 @@ The shim has no local API. It is a session on the Jellyfin server, and the serve
 
 1. A YouTube address (`youtube.com/watch`, `youtu.be`, `/shorts/`, `/live/`) plays in VacuumTube.
 2. A stream address of the Jellyfin server of the shim (`/Videos/ID/...`, `/Items/ID/...`, `/Audio/ID/...`) plays the item in the shim. Jellyfin then keeps the watched state and the resume position.
-3. Each other address plays in mpv. mpv uses the configuration folder of the shim, so it uses the same mpv program, options and scripts. With `JELLYFIN_MPV=cb1`, this is the CB1 mpv on its own VT with Dolby Vision. The FFmpeg of the CB1 build has GnuTLS for `https://` addresses. When this mpv ends, its script `htpc-screen.run` gives the screen back to Plasma, as for the shim.
+3. An audio address plays in the mpv of the distribution, without a picture and without the configuration of the shim. The TV stays on Plasma, and the TV wake does not run. The address is audio when it has the extension of an audio file, when the API request says `audio`, or when the DLNA item has the class `object.item.audioItem`. A video address that follows ends the audio mpv first.
+4. Each other address plays in mpv. mpv uses the configuration folder of the shim, so it uses the same mpv program, options and scripts. With `JELLYFIN_MPV=cb1`, this is the CB1 mpv on its own VT with Dolby Vision. The FFmpeg of the CB1 build has GnuTLS for `https://` addresses. When this mpv ends, its script `htpc-screen.run` gives the screen back to Plasma, as for the shim.
 
 ### One player at a time
 
@@ -97,6 +99,24 @@ The renderer is a UPnP AV media renderer (DLNA DMR). It announces itself with SS
 | Queue, next and previous | No |
 
 Home Assistant shows the media card of the entity. Its media browser can send media from other integrations to it, for example from the Jellyfin integration. Music Assistant also finds the renderer and offers it as a player.
+
+## DIAL launcher for VacuumTube
+
+DIAL is the protocol that the YouTube app of a phone uses to find a TV. VacuumTube answers it by itself, but only while it runs. The service answers for VacuumTube while the app is closed, so the HTPC shows up in the cast list of the YouTube app at all times. The service runs the launcher only when the entry of the YouTube app exists.
+
+| Step | What happens |
+|---|---|
+| Discovery | The service answers the SSDP search for `urn:dial-multiscreen-org:service:dial:1`. It is silent while VacuumTube runs, because VacuumTube answers then, and the phone must see the HTPC once. |
+| Launch | The phone sends `POST /dial/apps/YouTube` with its pairing data. The service answers `201` at once, starts VacuumTube, and sends the request on to the DIAL server of VacuumTube when this server takes it. Other players make room first, as for a video. |
+| While VacuumTube runs | The service sends `GET` and `POST` requests of a phone that still uses its address to the DIAL server of VacuumTube. |
+
+A phone shows a DIAL device in the cast list of the YouTube app only after it linked the device once, for example while VacuumTube runs, or with the TV code in the settings of VacuumTube. Then the phone lists the HTPC under "Linked devices", also while VacuumTube is closed. This differs from a Google Cast device, which the phone lists without a link. Google Cast needs a licensed receiver, so the HTPC cannot be one.
+
+The service answers with the name and the UDN (the unique ID) of VacuumTube, so the phone sees one device, whether VacuumTube runs or not. VacuumTube keeps its UDN over restarts. The service notices each start of VacuumTube, reads both from its description, and keeps them in `~/.local/state/x86-linux-htpc/dial-identity.json`. Before that first run, the service uses the name of the HTPC with the suffix " (VacuumTube)" and an own UDN. When the UDN changes, the service sends an SSDP goodbye for the old UDN, so a phone forgets the old device at once. A phone that linked the device before can list the device twice for a short time.
+
+The path has the name of the app as the DIAL registry spells it, `YouTube`. The phone sends this name. The service compares the name without regard to case. The REST API uses lower case names.
+
+The service finds the DIAL server of VacuumTube with an SSDP search, because the server uses another port at each start. So VacuumTube needs its option `device_discoverability`, which is on by default. The service cannot stop VacuumTube over DIAL, and it does not need to.
 
 ## Build
 

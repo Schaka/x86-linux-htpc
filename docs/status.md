@@ -21,7 +21,9 @@ This page lists the features of version 1.0.0-beta3. [hardware.md](hardware.md) 
 | Wake-on-LAN of the TV at login and at each video | Works | The TV must support a network wake from standby |
 | `setup.sh` on a fresh Fedora KDE install | Works | |
 | REST API with an OpenAPI document, to start YouTube videos, Jellyfin items, media addresses and apps, and to control the player that plays | Works | [control-api.md](control-api.md). The Android apps start, but report no state. |
-| DLNA renderer for Home Assistant and DLNA apps | Works | No volume, no queue |
+| DLNA renderer for Home Assistant and DLNA apps | Works | No volume, no queue. Music from a DLNA app plays without a picture. |
+| YouTube casting from the YouTube app of an Android phone | Works | The control API answers DIAL while VacuumTube is closed, starts it and sends the launch on. The phone must link the HTPC once, and then lists it under "Linked devices". [control-api.md](control-api.md) |
+| AirPlay receiver with UxPlay, for audio and screen mirroring from iPhones and Macs | Not verified | [airplay.md](airplay.md). Needs an Apple device. The receiver shows up in the network. |
 | Home Assistant | Guide | [home-assistant.md](home-assistant.md) |
 | HDMI-CEC | Planned | [cec.md](cec.md) has the design |
 

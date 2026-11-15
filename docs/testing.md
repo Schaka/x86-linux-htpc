@@ -13,6 +13,19 @@
 | Passthrough | `/proc/asound/card<n>/pcm<m>p/sub0/hw_params` shows the format `IEC958_SUBFRAME_LE`. For TrueHD and DTS-HD Master Audio, it also shows 8 channels at 192000 Hz. | The receiver shows the format, for example "Dolby Atmos" or "DTS:X" |
 | Android apps | `waydroid status` shows a running session, and the app starts | A 4K video plays without dropped frames |
 
+## Casting
+
+Two test sets cover the casting from phones and computers.
+
+| Test | What it checks | How to run it |
+|---|---|---|
+| Rust tests of `htpc-control` | The DLNA, REST and DIAL requests, the choice between audio and video playback, the cold start of VacuumTube through DIAL, and the identity that the phone sees. The tests use a fake VacuumTube and a fake start of mpv, so they start no program. | `cd control && cargo test` |
+| `tools/test-casting.py HOST` | A running HTPC, from another computer on the network, as a phone does: the DLNA search, music with pause, seek and stop, the REST API, the DIAL search and the app resource, and the AirPlay receiver | `tools/test-casting.py HOST --ssh USER@HOST` |
+
+The script plays a silent file, and it needs `ffmpeg`. The options `--video` and `--launch` also cast a test video and start YouTube through DIAL. Both wake the TV, so use them when someone can see the TV. With `--ssh`, the script also checks that music leaves the TV on Plasma and that VacuumTube closes after the launch test.
+
+A person must still test the casts of real apps: AirPlay mirroring from an Apple device, and the YouTube app of a phone.
+
 ## Test media
 
 The repository contains no media. Use short samples with the format in the file name, for example `dv-p7-fel-truehd-atmos.mkv`. `tools/make-audio-samples.sh` creates channel checks for each audio format.

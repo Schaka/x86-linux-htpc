@@ -7,7 +7,6 @@ description = "REST API and DLNA renderer that start and control the players of 
 publish = false
 
 [dependencies]
-anyhow = "1"
 axum = "0.8"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -25,3 +24,11 @@ lto = true
 codegen-units = 1
 strip = true
 opt-level = "s"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+uninlined_format_args = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"

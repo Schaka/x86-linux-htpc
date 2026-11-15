@@ -149,6 +149,40 @@ remove_file() {
 	fi
 }
 
+# Firewall
+
+# Allows one port or service in the zone, in the running and in the
+# permanent configuration. A reload of firewalld would drop the runtime
+# rules of other programs, for example the bridge of Waydroid, so the
+# function never reloads. The arguments are the zone, the add option, the
+# query option and a name for the message, for example
+# firewall_allow public --add-port=80/tcp --query-port=80/tcp "port 80/tcp".
+firewall_allow() {
+	local zone="$1" add="$2" query="$3" name="$4" mode
+	for mode in "" --permanent; do
+		# shellcheck disable=SC2086 # mode is empty or one option
+		if ! firewall-cmd ${mode} --zone="${zone}" "${query}" >/dev/null; then
+			firewall-cmd ${mode} --zone="${zone}" "${add}" >/dev/null
+			[[ -n "${mode}" ]] && info "Allowed ${name} in the firewall zone ${zone}"
+		fi
+	done
+	return 0
+}
+
+# Takes back a rule of firewall_allow. The arguments are the zone, the
+# remove option, the query option and a name for the message.
+firewall_deny() {
+	local zone="$1" remove="$2" query="$3" name="$4" mode
+	for mode in "" --permanent; do
+		# shellcheck disable=SC2086 # mode is empty or one option
+		if firewall-cmd ${mode} --zone="${zone}" "${query}" >/dev/null; then
+			firewall-cmd ${mode} --zone="${zone}" "${remove}" >/dev/null
+			[[ -n "${mode}" ]] && info "Closed ${name} in the firewall zone ${zone}"
+		fi
+	done
+	return 0
+}
+
 # Configuration
 
 # Prints the value of KEY from the configuration file, or the default value.
