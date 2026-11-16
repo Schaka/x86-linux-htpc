@@ -75,6 +75,17 @@ The project has no CEC component yet. Network wake turns the TV on, and a USB re
 | Boards with a VBT limit of 297 MHz | 4K at 50 and 60 Hz runs only as YCbCr 4:2:0. Dolby Vision works only up to 4K 30 Hz, and HDR10 at 4K only with 8 bits. The next section shows the fix. |
 | HDMI 2.1 (FRL) | The patch set and the tested GPUs support HDMI 2.0 rates only |
 
+## Known air mice
+
+The table lists the keys that each remote sends to Linux. "Service" says whether the remote needs its USB ID in `AIR_MOUSE_USB_IDS`. [tv-control.md](tv-control.md) explains the service. For another remote, `tools/detect-remote.py` records its keys and prints a row for this table.
+
+| Remote | USB ID of the receiver | OK | Back | Home | Menu | Service |
+|---|---|---|---|---|---|---|
+| Rii i25 mini | `1997:2433` | `BTN_LEFT` | `BTN_RIGHT` | `KEY_HOMEPAGE` | `KEY_COMPOSE` | Yes. Without the service, OK is always a click and Back is a right click. |
+| Orbsmart AM-1 Pro | `1915:1025` | `BTN_LEFT` with the sensor on, `KEY_ENTER` with the sensor off | `KEY_BACK` | `KEY_HOMEPAGE` | `KEY_COMPOSE` | No. The remote changes OK itself. While it lies still, it sends a small movement about once a second. |
+
+Both remotes send the arrows, Play/Pause and the volume keys as standard keys, for example `KEY_UP` and `KEY_PLAYPAUSE`. The USB ID belongs to the radio chip of the receiver, so other remotes can have the same ID and other keys.
+
 ## A firmware limit of the HDMI port
 
 The VBT (Video BIOS Table) of the firmware describes the display ports of the board. Its field "HDMI max data rate" can limit an HDMI port below the rate of the GPU. The `i915` driver obeys this field. If a mode needs more, the driver chooses YCbCr 4:2:0, fewer bits, or no mode at all.

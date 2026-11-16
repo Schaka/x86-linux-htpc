@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 #
 # Installs Plasma Bigscreen, logs the HTPC user in to it automatically and
-# turns off the screen lock and the automatic suspend of that user.
+# turns off the screen lock and the automatic suspend of that user. A KWin
+# script keeps the home screen in front and in focus.
 set -euo pipefail
 # shellcheck source=../../lib/htpc.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../../lib/htpc.sh"
@@ -10,6 +11,7 @@ require_root
 
 component_dir="$(dirname "${BASH_SOURCE[0]}")"
 session_name="plasma-bigscreen-wayland"
+kwin_script=x86-linux-htpc-home
 
 # Plasma Login Manager is based on SDDM and reads the same [Autologin]
 # keys, each from its own drop-in folder.
@@ -173,6 +175,29 @@ UNIT
 		info "The output settings apply at the next login."
 }
 
+# The KWin script files/kwin-home gives the focus back to the home screen
+# and closes the launch screen after a player on its own VT. KWin loads
+# the scripts with a plugin entry at each login. In a running session, the
+# D-Bus call loads a new or changed script at once.
+install_kwin_script() {
+	local file target changed=no
+	for file in metadata.json contents/code/main.js; do
+		target=".local/share/kwin/scripts/${kwin_script}/${file}"
+		cmp -s "${component_dir}/files/kwin-home/${file}" "$(htpc_user_home)/${target}" || changed=yes
+		install_user_file "${component_dir}/files/kwin-home/${file}" "${target}"
+	done
+	run_as_htpc_user kwriteconfig6 --file kwinrc --group Plugins --key "${kwin_script}Enabled" true
+	if [[ "${changed}" == yes ]]; then
+		kwin_scripting unloadScript s "${kwin_script}" || true
+	fi
+	kwin_scripting start ||
+		info "KWin loads the script ${kwin_script} at the next login."
+}
+
+kwin_scripting() {
+	run_as_htpc_user busctl --user call org.kde.KWin /Scripting org.kde.kwin.Scripting "$@" >/dev/null 2>&1
+}
+
 install_packages "${component_dir}"
 [[ -f "/usr/share/wayland-sessions/${session_name}.desktop" ]] ||
 	fail "The package list installed no ${session_name}.desktop."
@@ -181,4 +206,5 @@ configure_user_session
 disable_screen_edges
 ignore_sleep_keys
 install_kwin_environment
+install_kwin_script
 install_display_service

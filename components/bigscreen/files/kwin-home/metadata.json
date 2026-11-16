@@ -1,0 +1,12 @@
+{
+    "KPlugin": {
+        "Id": "x86-linux-htpc-home",
+        "Name": "x86-linux-htpc home screen",
+        "Description": "Keeps the Plasma Bigscreen home screen in front and in focus on the TV",
+        "License": "AGPL-3.0-only",
+        "EnabledByDefault": true
+    },
+    "X-Plasma-API": "javascript",
+    "X-Plasma-API-Minimum-Version": "6.0",
+    "KPackageStructure": "KWin/Script"
+}

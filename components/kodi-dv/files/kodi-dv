@@ -29,7 +29,6 @@ WINDOW_SYSTEM_VARIABLES = ("WAYLAND_DISPLAY", "DISPLAY", "WAYLAND_SOCKET")
 # KWin drops the DRM master a moment after the switch.
 SWITCH_TIMEOUT = 5.0
 MASTER_WAIT = 1.0
-HOME_WAIT = 2.0
 
 
 def config_value(key, default=""):
@@ -75,13 +74,15 @@ def switch_to(vt):
     return True
 
 
-def show_bigscreen_home():
+def show_home():
     """Plasma Bigscreen shows a launch screen after a tile starts an app, until
     a window of the app is active. Kodi opens no Plasma window, so the
-    launch screen would stay. The home screen closes it."""
+    launch screen would stay. The KWin script of the component bigscreen
+    closes it and gives the focus to the home screen. The script waits for
+    KWin to take the screen back."""
     subprocess.run(
-        ["busctl", "--user", "call", "org.kde.kglobalaccel", "/component/plasmashell",
-         "org.kde.kglobalaccel.Component", "invokeShortcut", "s", "Toggle Bigscreen Home Screen"],
+        ["busctl", "--user", "call", "org.kde.kglobalaccel", "/component/kwin",
+         "org.kde.kglobalaccel.Component", "invokeShortcut", "s", "x86-linux-htpc show home"],
         capture_output=True, timeout=10)
 
 
@@ -117,15 +118,8 @@ def main():
     env = {k: v for k, v in os.environ.items() if k not in WINDOW_SYSTEM_VARIABLES}
     env["XDG_SESSION_TYPE"] = "tty"
     status = subprocess.run([KODI, *sys.argv[1:]], env=env).returncode
-    if previous and active_vt() == vt:
-        switch_to(previous)
-        # KWin takes the screen back a moment after the switch. Before that,
-        # Plasma ignores the shortcut, and the launch screen stays.
-        deadline = time.monotonic() + SWITCH_TIMEOUT
-        while active_vt() != previous and time.monotonic() < deadline:
-            time.sleep(0.1)
-        time.sleep(HOME_WAIT)
-        show_bigscreen_home()
+    if previous and active_vt() == vt and switch_to(previous):
+        show_home()
     return status
 
 

@@ -42,6 +42,8 @@ A 2.4 GHz air mouse appears as four input devices: a keyboard, a mouse, a "Syste
 
 Many air mice have a mouse key that turns the motion sensor off and on. With the sensor off, the remote sends keys but no pointer movement.
 
+Some air mice change OK themselves: with the sensor on, OK is `BTN_LEFT`, and with the sensor off, OK is `KEY_ENTER`. Back is `KEY_BACK`. Such a remote needs no entry in `AIR_MOUSE_USB_IDS`. [hardware.md](hardware.md#known-air-mice) lists known air mice and their keys. For another remote, run `tools/detect-remote.py` on the HTPC and press the keys in the order that it shows. It says whether the remote needs an entry in `AIR_MOUSE_USB_IDS`. While they lie still, some of these remotes also send a small movement about once a second.
+
 The TV interfaces move a focus frame with the arrow keys, and there OK must be Enter. With the pointer, OK must be a click. The component `remote-keys` runs the service `x86-linux-htpc-air-mouse.service` for the receivers in `AIR_MOUSE_USB_IDS`. The service takes their input devices for itself and sends their events through one virtual device, "x86-linux-htpc air mouse":
 
 | Key | What the service sends |
@@ -52,7 +54,7 @@ The TV interfaces move a focus frame with the arrow keys, and there OK must be E
 | Back | `KEY_BACK` |
 | All other keys and the movement | Unchanged |
 
-A hand never holds the remote still, so a movement counts only above a small distance. The CB1 mpv on its own VT has no window system. Its script `htpc-screen.run` gives mpv the pointer movement and the clicks, and draws a pointer on the OSD for 5 seconds after each movement.
+A hand never holds the remote still, so a movement counts only above a small distance. The CB1 mpv on its own VT has no window system. Its script `htpc-screen.run` gives mpv the pointer movement and the clicks, and draws a pointer on the OSD. Only a movement above the same small distance shows the pointer. The pointer goes away 5 seconds after the last such movement, or at an arrow key. While the pointer is off, the script gives mpv no movement, because mpv shows the controls of the player at each mouse movement.
 
 The component `bigscreen` makes the sleep key do nothing, so the power key of such a remote does not suspend the HTPC. A suspended HTPC takes no cast, and some boards do not wake up from a USB remote.
 

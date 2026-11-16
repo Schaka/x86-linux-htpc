@@ -5,9 +5,13 @@ hdr10. The DRM output sets the connector, CRTC and plane properties of the
 mode while the video plays, and sets the old values back at the end.
 docs/cb1-integration.md of x86-linux-htpc describes the properties.
 
+The DRM output also turns off all other planes on its CRTC when it takes
+the display, in every mode. A compositor can leave its cursor plane on at
+a VT switch, and the cursor then stays over the picture of mpv.
+
 License: the license of mpv.
 diff --git a/video/out/drm_atomic.c b/video/out/drm_atomic.c
-index ffdaa39..0a16b54 100644
+index ffdaa39..3da9757 100644
 --- a/video/out/drm_atomic.c
 +++ b/video/out/drm_atomic.c
 @@ -17,6 +17,7 @@
@@ -18,7 +22,7 @@ index ffdaa39..0a16b54 100644
  
  #include "common/common.h"
  #include "common/msg.h"
-@@ -404,6 +405,129 @@ bool drm_atomic_save_old_state(struct drm_atomic_context *ctx)
+@@ -404,6 +405,138 @@ bool drm_atomic_save_old_state(struct drm_atomic_context *ctx)
      return ret;
  }
  
@@ -103,25 +107,34 @@ index ffdaa39..0a16b54 100644
 +        };
 +    }
 +
-+    // The kernel accepts TV-led Dolby Vision only while the draw plane is
-+    // the single plane on the CRTC, because a second plane changes pixels.
-+    // The HDR10 output keeps the same rule, so a cursor never shows.
-+    // A compositor can leave its cursor plane on at a VT switch. These
-+    // planes are not restored, because the compositor sets all its planes
-+    // again when it gets the display back.
++    return true;
++}
++
++// A compositor can leave its cursor plane on at a VT switch, and the cursor
++// then stays over the picture of mpv. The kernel also accepts TV-led Dolby
++// Vision only while the draw plane is the single plane on the CRTC,
++// because a second plane changes pixels. These planes are not restored,
++// because the compositor sets all its planes again when it gets the display
++// back.
++bool drm_atomic_stage_other_planes_off(struct mp_log *log, drmModeAtomicReqPtr request,
++                                       struct drm_atomic_context *ctx)
++{
 +    drmModePlaneRes *planes = drmModeGetPlaneResources(ctx->fd);
 +    if (!planes)
 +        return false;
 +    bool ok = true;
 +    for (uint32_t i = 0; i < planes->count_planes && ok; i++) {
-+        if (planes->planes[i] == ctx->draw_plane->id)
++        // The video plane of the drmprime overlay belongs to mpv as well.
++        uint32_t id = planes->planes[i];
++        if (id == ctx->draw_plane->id ||
++            (ctx->drmprime_video_plane && id == ctx->drmprime_video_plane->id))
 +            continue;
-+        drmModePlane *plane = drmModeGetPlane(ctx->fd, planes->planes[i]);
++        drmModePlane *plane = drmModeGetPlane(ctx->fd, id);
 +        bool active = plane && plane->crtc_id == ctx->crtc->id;
 +        drmModeFreePlane(plane);
 +        if (!active)
 +            continue;
-+        struct drm_object *object = drm_object_create(log, ctx->fd, planes->planes[i],
++        struct drm_object *object = drm_object_create(log, ctx->fd, id,
 +                                                      DRM_MODE_OBJECT_PLANE);
 +        ok = object &&
 +             drm_object_set_property(request, object, "FB_ID", 0) >= 0 &&
@@ -149,7 +162,7 @@ index ffdaa39..0a16b54 100644
  {
      if (!ctx->old_state.saved)
 diff --git a/video/out/drm_atomic.h b/video/out/drm_atomic.h
-index 499aa33..973d485 100644
+index 499aa33..e947b3c 100644
 --- a/video/out/drm_atomic.h
 +++ b/video/out/drm_atomic.h
 @@ -43,6 +43,14 @@ struct drm_atomic_plane_state {
@@ -177,18 +190,20 @@ index 499aa33..973d485 100644
  };
  
  struct drm_object {
-@@ -92,6 +103,9 @@ struct drm_atomic_context *drm_atomic_create_context(struct mp_log *log, int fd,
+@@ -92,6 +103,11 @@ struct drm_atomic_context *drm_atomic_create_context(struct mp_log *log, int fd,
  void drm_atomic_destroy_context(struct drm_atomic_context *ctx);
  
  bool drm_atomic_save_old_state(struct drm_atomic_context *ctx);
 +bool drm_atomic_stage_dvbridge(struct mp_log *log, drmModeAtomicReqPtr request,
 +                               struct drm_atomic_context *ctx, bool hdr10);
++bool drm_atomic_stage_other_planes_off(struct mp_log *log, drmModeAtomicReqPtr request,
++                                       struct drm_atomic_context *ctx);
 +bool drm_atomic_restore_dvbridge(drmModeAtomicReqPtr request, struct drm_atomic_context *ctx);
  bool drm_atomic_restore_old_state(drmModeAtomicReq *request, struct drm_atomic_context *ctx);
  
  bool drm_mode_ensure_blob(int fd, struct drm_mode *mode);
 diff --git a/video/out/drm_common.c b/video/out/drm_common.c
-index ffc5ebf..9ea0103 100644
+index ffc5ebf..975a442 100644
 --- a/video/out/drm_common.c
 +++ b/video/out/drm_common.c
 @@ -104,6 +104,8 @@ const struct m_sub_options drm_conf = {
@@ -200,7 +215,7 @@ index ffc5ebf..9ea0103 100644
          {0},
      },
      .defaults = &(const struct drm_opts) {
-@@ -385,6 +387,12 @@ bool vo_drm_acquire_crtc(struct vo_drm_state *drm)
+@@ -385,6 +387,17 @@ bool vo_drm_acquire_crtc(struct vo_drm_state *drm)
          }
      }
  
@@ -210,10 +225,15 @@ index ffc5ebf..9ea0103 100644
 +        goto err;
 +    }
 +
++    if (!drm_atomic_stage_other_planes_off(drm->log, request, atomic_ctx)) {
++        MP_ERR(drm, "Could not turn off the other planes of the CRTC\n");
++        goto err;
++    }
++
      drm_object_set_property(request, atomic_ctx->draw_plane, "FB_ID",   drm->fb->id);
      drm_object_set_property(request, atomic_ctx->draw_plane, "CRTC_ID", drm->crtc_id);
      drm_object_set_property(request, atomic_ctx->draw_plane, "SRC_X",   0);
-@@ -421,6 +429,21 @@ void vo_drm_release_crtc(struct vo_drm_state *drm)
+@@ -421,6 +434,21 @@ void vo_drm_release_crtc(struct vo_drm_state *drm)
  
      bool success = true;
      struct drm_atomic_context *atomic_ctx = drm->atomic_context;
@@ -235,7 +255,7 @@ index ffc5ebf..9ea0103 100644
      drmModeAtomicReqPtr request = drmModeAtomicAlloc();
      if (!request) {
          MP_ERR(drm, "Failed to allocate drm atomic request\n");
-@@ -1355,9 +1378,32 @@ double vo_drm_get_display_fps(struct vo_drm_state *drm)
+@@ -1355,9 +1383,32 @@ double vo_drm_get_display_fps(struct vo_drm_state *drm)
      return mode_get_Hz(&drm->mode.mode);
  }
  
@@ -268,7 +288,7 @@ index ffc5ebf..9ea0103 100644
      struct mp_image_params target_params = vo_get_target_params(vo);
      if (!force_sdr && (pl_color_space_equal(&target_params.color, &drm->target_params.color) ||
          !target_params.w || !target_params.h))
-@@ -1399,6 +1445,8 @@ bool vo_drm_set_hdr_metadata(struct vo *vo, bool force_sdr)
+@@ -1399,6 +1450,8 @@ bool vo_drm_set_hdr_metadata(struct vo *vo, bool force_sdr)
      };
      drmModeCreatePropertyBlob(drm->fd, &metadata, sizeof(metadata), &drm->hdr.blob_id);
      drm_object_set_property(atomic_ctx->request, atomic_ctx->connector, "HDR_OUTPUT_METADATA", drm->hdr.blob_id);

@@ -33,10 +33,6 @@ RELEASE_DELAY = 1.0
 # mpv holds the DRM master until its process ends. Plasma gets the master
 # back only after that.
 EXIT_WAIT = 5.0
-# KWin takes the screen back a moment after the switch to its VT. Before
-# that, Plasma ignores the shortcut of the home screen.
-SWITCH_TIMEOUT = 5.0
-HOME_WAIT = 2.0
 DEVICE_SCAN_INTERVAL = 2.0
 
 EVENT_FORMAT = "llHHi"
@@ -50,6 +46,14 @@ KEY_RELEASE, KEY_PRESS = 0, 1
 # for each pixel makes a slow pointer.
 POINTER_SPEED = 2.0
 POINTER_HIDE_DELAY = 5.0
+# A hand never holds a remote still, and some air mice send a count of
+# movement each second while they lie on the table. So only a movement
+# above MOVE_THRESHOLD counts within MOVE_WINDOW shows the pointer and keeps
+# it on. Small movement moves a pointer that is on, and does nothing else.
+# mpv shows the controls of the player at each mouse movement, so small
+# movement does not reach mpv while the pointer is off.
+MOVE_THRESHOLD = 25
+MOVE_WINDOW = 0.5
 POINTER_OVERLAY_ID = 63
 # The arrow of the pointer as an ASS drawing, for a 1080 pixel high OSD
 POINTER_SHAPE = "m 0 0 l 0 34 l 9 26 l 15 39 l 21 36 l 15 24 l 26 24"
@@ -75,6 +79,8 @@ KEYS.update({2 + i: str((i + 1) % 10) for i in range(10)})
 for first_code, letters in ((16, "qwertyuiop"), (30, "asdfghjkl"), (44, "zxcvbnm")):
     KEYS.update({first_code + i: letter for i, letter in enumerate(letters)})
 KEY_BACK = 158
+# An arrow key ends the pointer use at once.
+ARROW_KEYS = {103, 105, 106, 108}
 # The shim uses ESC only in its menus and its browser. During playback, ESC
 # only leaves fullscreen, and "q" stops. So the Back key of a remote stops a
 # video that plays, and goes back in the browser otherwise.
@@ -106,14 +112,16 @@ def plasma_vt():
     return int(vt) if vt.isdigit() else 0
 
 
-def show_bigscreen_home():
+def show_home():
     """Plasma Bigscreen shows a launch screen after a tile starts an app, until
     a window of the app is active. mpv draws on its own VT and never opens a
-    Plasma window, so the launch screen would stay. The home screen closes
-    it. Without Bigscreen, the call fails and changes nothing."""
+    Plasma window, so the launch screen would stay. The KWin script of the
+    component bigscreen closes it and gives the focus to the home screen. The
+    script waits for KWin to take the screen back. Without the script, the
+    call changes nothing."""
     subprocess.run(
-        ["busctl", "--user", "call", "org.kde.kglobalaccel", "/component/plasmashell",
-         "org.kde.kglobalaccel.Component", "invokeShortcut", "s", "Toggle Bigscreen Home Screen"],
+        ["busctl", "--user", "call", "org.kde.kglobalaccel", "/component/kwin",
+         "org.kde.kglobalaccel.Component", "invokeShortcut", "s", "x86-linux-htpc show home"],
         capture_output=True, timeout=10)
 
 
@@ -151,6 +159,7 @@ class Screen:
         self.osd_size = (3840, 2160)
         self.pointer = None
         self.pointer_hide_at = None
+        self.moves = []
 
     def send(self, *command, request_id=0):
         message = {"command": list(command), "request_id": request_id}
@@ -181,14 +190,6 @@ class Screen:
         self.log(f"Switched to VT {vt}")
         return True
 
-    def show_home_when_plasma_is_back(self, vt):
-        deadline = time.monotonic() + SWITCH_TIMEOUT
-        while active_vt() != vt and time.monotonic() < deadline:
-            time.sleep(0.1)
-        time.sleep(HOME_WAIT)
-        show_bigscreen_home()
-        self.log("Showed the Bigscreen home screen")
-
     def needs_screen(self):
         return (self.state["force-window"] or not self.state["idle-active"]
                 or self.state["vo-configured"])
@@ -211,7 +212,8 @@ class Screen:
             previous = plasma_vt()
         self.log(f"Release: previous VT {previous}, active VT {active_vt()}, own VT {self.vt}")
         if previous and active_vt() == self.vt and self.switch_to(previous):
-            self.show_home_when_plasma_is_back(previous)
+            show_home()
+            self.log("Asked KWin to show the home screen")
 
     def handle_message(self, message):
         if message.get("event") == "property-change" and message.get("name") in self.state:
@@ -277,6 +279,23 @@ class Screen:
             name = "Ctrl+" + name
         return name
 
+    def pointer_shown(self):
+        return self.pointer_hide_at is not None
+
+    def is_deliberate(self, distance):
+        now = time.monotonic()
+        self.moves = [(t, d) for t, d in self.moves if now - t <= MOVE_WINDOW]
+        self.moves.append((now, distance))
+        return sum(d for _, d in self.moves) >= MOVE_THRESHOLD
+
+    def handle_movement(self, dx, dy):
+        deliberate = self.is_deliberate(abs(dx) + abs(dy))
+        if not deliberate and not self.pointer_shown():
+            return
+        self.move_pointer(dx, dy)
+        if deliberate:
+            self.keep_pointer_on()
+
     def move_pointer(self, dx, dy):
         width, height = self.osd_size
         x, y = self.pointer or (width // 2, height // 2)
@@ -286,6 +305,9 @@ class Screen:
         self.send("mouse", int(x), int(y))
         self.draw_pointer()
 
+    def keep_pointer_on(self):
+        self.pointer_hide_at = time.monotonic() + POINTER_HIDE_DELAY
+
     def draw_pointer(self):
         width, height = self.osd_size
         scale = int(100 * height / 1080)
@@ -294,7 +316,6 @@ class Screen:
                 f"\\fscx{scale}\\fscy{scale}\\p1}}{POINTER_SHAPE}{{\\p0}}")
         self.send_named({"name": "osd-overlay", "id": POINTER_OVERLAY_ID, "format": "ass-events",
                          "data": data, "res_x": width, "res_y": height, "z": 1000})
-        self.pointer_hide_at = time.monotonic() + POINTER_HIDE_DELAY
 
     def hide_pointer(self):
         self.pointer_hide_at = None
@@ -307,6 +328,7 @@ class Screen:
         if self.pointer:
             self.send("mouse", int(self.pointer[0]), int(self.pointer[1]))
             self.draw_pointer()
+            self.keep_pointer_on()
         self.send("keydown" if pressed else "keyup", "MBTN_LEFT")
 
     def read_device(self, name, fd):
@@ -340,12 +362,14 @@ class Screen:
             # Plasma reads the keys while its VT is in front.
             if not in_front:
                 continue
+            if code in ARROW_KEYS and value == KEY_PRESS and self.pointer_shown():
+                self.hide_pointer()
             name = self.key_name(code)
             if name:
                 # mpv repeats a held key by itself between keydown and keyup.
                 self.send("keydown" if value == KEY_PRESS else "keyup", name)
         if in_front and (dx or dy):
-            self.move_pointer(dx, dy)
+            self.handle_movement(dx, dy)
 
     def wait_for_mpv_exit(self):
         deadline = time.monotonic() + EXIT_WAIT

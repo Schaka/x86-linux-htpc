@@ -96,6 +96,22 @@ wayland_socket() {
 	find "/run/user/${uid}" -maxdepth 1 -type s -name 'wayland-[0-9]*' -printf '%f\n' | sort | head -n 1
 }
 
+kwin_script=x86-linux-htpc-home
+
+kwin_script_enabled() {
+	[[ -f "${home}/.local/share/kwin/scripts/${kwin_script}/contents/code/main.js" ]] &&
+		user_config_is kwinrc "${kwin_script}Enabled" true
+}
+
+kwin_script_loaded() {
+	[[ "$(run_as_htpc_user busctl --user call org.kde.KWin /Scripting org.kde.kwin.Scripting \
+		isScriptLoaded s "${kwin_script}" 2>/dev/null)" == "b true" ]]
+}
+
+check "The KWin script keeps the focus on the home screen" kwin_script_enabled
+if bigscreen_session_runs; then
+	check "KWin runs the home screen script" kwin_script_loaded
+fi
 check "The output settings apply at each login" display_service_enabled
 if bigscreen_session_runs; then
 	check "The output has DISPLAY_MODE and DISPLAY_HDR" display_matches_config

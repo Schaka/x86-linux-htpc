@@ -44,6 +44,19 @@ Bigscreen sorts the Favorites row in its own order, not in the order of `HOME_SC
 
 The component comes last in the install order, because the other components add the desktop entries of the apps.
 
+## Focus of the home screen
+
+The Bigscreen home screen shows its tiles only while its window has the keyboard focus. Without the focus, the TV shows only the wallpaper, and the keys of a remote reach no window. A click at the pointer can still start an app from a tile that the TV does not show.
+
+When the TV output goes away and comes back, Plasma creates the window of the home screen again. Two events do this: the TV or the receiver turns on, or a player switches to its own VT. If another window takes the focus at that moment and closes, no window has the focus.
+
+The component `bigscreen` installs the KWin script `x86-linux-htpc-home` (folder `~/.local/share/kwin/scripts/`). It has two jobs:
+
+| Job | How |
+|---|---|
+| Focus | One second after no window has the focus, or after the active window is minimized, the script gives the focus to the home screen. |
+| Back from a player | The CB1 mpv and Kodi play on their own VT and open no Plasma window, so the launch screen of their tile stays. When they give the screen back, they call the KWin shortcut "x86-linux-htpc show home". The script closes the launch screen, minimizes the other windows and gives the focus to the home screen. It tries again every half second for 10 seconds, because KWin gets the display back a moment after the VT switch. |
+
 ## Power
 
 The HTPC does not suspend by itself. A suspended HTPC cannot receive a cast from Jellyfin. The TV and the receiver turn off over HDMI-CEC. The configuration file can turn on suspend after a time without use.
