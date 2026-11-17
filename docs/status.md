@@ -1,6 +1,6 @@
 # Status
 
-This page lists the features of version 1.0.0-beta6. [hardware.md](hardware.md) lists the hardware that the features work on.
+This page lists the features of version 1.0.0-beta7. [hardware.md](hardware.md) lists the hardware that the features work on.
 
 ## Features
 
