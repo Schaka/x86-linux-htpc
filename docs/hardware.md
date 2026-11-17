@@ -84,7 +84,7 @@ The table lists the keys that each remote sends to Linux. "Service" says whether
 | Rii i25 mini | `1997:2433` | `BTN_LEFT` | `BTN_RIGHT` | `KEY_HOMEPAGE` | `KEY_COMPOSE` | Yes. Without the service, OK is always a click and Back is a right click. |
 | Orbsmart AM-1 Pro | `1915:1025` | `BTN_LEFT` with the sensor on, `KEY_ENTER` with the sensor off | `KEY_BACK` | `KEY_HOMEPAGE` | `KEY_COMPOSE` | No. The remote changes OK itself. While it lies still, it sends a small movement about once a second. |
 
-Both remotes send the arrows, Play/Pause and the volume keys as standard keys, for example `KEY_UP` and `KEY_PLAYPAUSE`. The USB ID belongs to the radio chip of the receiver, so other remotes can have the same ID and other keys.
+Both remotes send the arrows, Play/Pause and the volume keys as standard keys, for example `KEY_UP` and `KEY_PLAYPAUSE`. On the Orbsmart AM-1 Pro, the power button and the A button send no key over USB, because they work by infrared. The Search button sends `KEY_SEARCH`, so it can serve as the power key of [power-key.md](power-key.md). The USB ID belongs to the radio chip of the receiver, so other remotes can have the same ID and other keys.
 
 ## A firmware limit of the HDMI port
 

@@ -24,7 +24,8 @@ description: Use when a user wants Home Assistant to control the TV, the receive
 6. Build each job as [docs/home-assistant.md](../../../docs/home-assistant.md) shows, with `rest_command.htpc_control` for the starts. Use the entity IDs of the user. If the user has scripts for another player, add new scripts next to them. Do not change the old scripts until the user agrees.
 7. Test the chain without a picture first: a start with a wrong ID answers 400 or 404 through Home Assistant.
 8. Test each script once, after the user agrees. For a video, use a short item, and read `GET /api/v1/status` and the state of the media player entity. Ask the user what the TV shows.
-9. Write down for the user which scripts exist and what each one does.
+9. If the user wants the power key to control the TV and the receiver, load the skill `power-key`. Build the automation of [docs/power-key.md](../../../docs/power-key.md) with a long random webhook ID. Then put the address into `POWER_WEBHOOK_URL` on the HTPC. Run `sudo ./install.sh power-key`. Do not print the address. Ask the user to press the key of the remote. The HTPC must stay on, so never press a key on it yourself.
+10. Write down for the user which scripts exist and what each one does.
 
 ## If the TV has no network API
 

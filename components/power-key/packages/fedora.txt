@@ -1,0 +1,2 @@
+# The service reads the keys of the remote with python-evdev.
+python3-evdev

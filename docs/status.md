@@ -19,6 +19,7 @@ This page lists the features of version 1.0.0-beta6. [hardware.md](hardware.md) 
 | Kodi with CB1 and the add-on "Jellyfin for Kodi" | Works | Dolby Vision profile 5, 8.1 and 7 FEL, and Dolby Atmos |
 | Air mouse: OK as a click or as Enter, Back as Back | Works | |
 | Wake-on-LAN of the TV at login and at each video | Works | The TV must support a network wake from standby |
+| Power key of the remote turns the TV and the AV receiver on and off | Works | [power-key.md](power-key.md). The HTPC itself stays on. Both routes work: a Home Assistant webhook, and the HTPC alone with Wake-on-LAN and commands. The HTPC alone needs a command for each device ([device-commands.md](device-commands.md)). A remote whose power button works by infrared needs another key. |
 | `setup.sh` on a fresh Fedora KDE install | Works | |
 | REST API with an OpenAPI document, to start YouTube videos, Jellyfin items, media addresses and apps, and to control the player that plays | Works | [control-api.md](control-api.md). The Android apps start, but report no state. |
 | DLNA renderer for Home Assistant and DLNA apps | Works | No volume, no queue. Music from a DLNA app plays without a picture. |

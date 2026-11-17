@@ -13,6 +13,7 @@ youtube-tv
 kodi-dv
 remote-keys
 network-wake
+power-key
 control-api
 airplay
 home-screen

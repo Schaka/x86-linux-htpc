@@ -50,8 +50,14 @@ AUDIO_PASSTHROUGH_FORMATS="ac3 eac3 truehd dts dts-hd"
 
 # The MAC addresses that get a Wake-on-LAN packet at login and at the start
 # of each video, separated by spaces, for example the cable and the Wi-Fi
-# address of the TV. Turn on the network wake setting of the TV.
+# address of the TV. Turn on the network wake setting of each device. The
+# power key of POWER_KEYS uses them too.
 WAKE_ON_LAN_MACS=
+
+# Turn on the network wake of the network cards of the HTPC, so that another
+# device can wake it: yes or no. After a power-off, the USB port of a dock
+# can lose its power, and then its network card cannot wake the HTPC.
+HTPC_WAKE_ON_LAN=yes
 
 # The apps on the home screen of Plasma Bigscreen, as desktop file names
 # separated by spaces. The home screen then shows only these apps, in its
@@ -84,6 +90,46 @@ TWITCH_PROXY_URL="https://eu.luminous.dev/live/${channel}?allow_source=true&allo
 # as VENDOR:PRODUCT separated by spaces. "lsusb" shows the ID of the USB
 # receiver. The component remote-keys turns the clicks into Enter and Back.
 AIR_MOUSE_USB_IDS=
+
+# The keys of a remote that turn the TV and the AV receiver on and off, as
+# evdev key names separated by spaces. The power key of an air mouse sends
+# KEY_SLEEP, and some other remotes send KEY_POWER. The HTPC itself never
+# suspends or shuts down: the component bigscreen makes the system ignore
+# both keys. Any other key, for example KEY_SEARCH, reaches no other program:
+# the service takes the remote and passes all other keys on. Empty: the key
+# does nothing.
+# docs/power-key.md explains the two routes below.
+POWER_KEYS=KEY_SLEEP
+
+# Route 1, Home Assistant: the address of a webhook trigger, for example
+# http://192.0.2.10:8123/api/webhook/ID. The key sends the action "toggle"
+# to it, and Home Assistant turns the devices on or off by their state. The
+# ID in the address works like a password. Empty: route 2.
+POWER_WEBHOOK_URL=
+
+# Route 1 only: send Wake-on-LAN to WAKE_ON_LAN_MACS before the webhook, for a
+# toggle or an on: yes or no. A TV that Home Assistant cannot switch on, for
+# example because the player that sends HDMI-CEC is off, then wakes by network.
+POWER_WEBHOOK_WAKE=yes
+
+# Route 2, the HTPC itself. The on step sends Wake-on-LAN to
+# WAKE_ON_LAN_MACS, and then runs POWER_ON_COMMAND. The off step runs
+# POWER_OFF_COMMAND. Each command is one shell line, for example a call to
+# the network API of the AV receiver. docs/device-commands.md has examples.
+# Use single quotes inside it, because a value cannot contain a double
+# quote.
+POWER_ON_COMMAND=
+POWER_OFF_COMMAND=
+
+# A command that tells the state: the exit code 0 means that the devices are
+# on. Empty: the devices are on while the HDMI output HDMI_OUTPUT has a
+# connected display. Some TVs and receivers keep the HDMI link up in standby.
+# Then use a command that asks the receiver.
+POWER_STATE_COMMAND=
+
+# Stop all media before the off step: yes or no. The component control-api
+# does the stop. Without it, the step is skipped.
+POWER_STOP_MEDIA=yes
 
 # HDMI-CEC events: yes or no for each.
 CEC_POWER_ON_AT_START=yes

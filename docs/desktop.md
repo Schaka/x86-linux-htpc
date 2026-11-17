@@ -59,6 +59,6 @@ The component `bigscreen` installs the KWin script `x86-linux-htpc-home` (folder
 
 ## Power
 
-The HTPC does not suspend by itself. A suspended HTPC cannot receive a cast from Jellyfin. The TV and the receiver turn off over HDMI-CEC. The configuration file can turn on suspend after a time without use.
+The HTPC stays on at all times. A suspended HTPC cannot receive a cast from Jellyfin. The component `bigscreen` makes logind and Plasma ignore the power key, the sleep key, the lid and the idle time. The screen neither dims nor turns off. It also masks the sleep targets. So nothing suspends or hibernates the HTPC, and no key shuts it down. To turn it off, run `systemctl poweroff`.
 
-The power key in Plasma Bigscreen turns off the TV and the receiver over HDMI-CEC. [cec.md](cec.md) lists the CEC events.
+The power key of a remote turns the TV and the receiver on and off through the component `power-key`. The HTPC stays on. [power-key.md](power-key.md) describes it.

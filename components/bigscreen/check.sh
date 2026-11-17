@@ -39,7 +39,7 @@ fi
 # Plasma writes its shortcut file some time after a change, so the check
 # asks the running shortcut service first.
 sleep_keys_ignored() {
-	grep -qx "HandleSuspendKey=ignore" /etc/systemd/logind.conf.d/x86-linux-htpc.conf || return 1
+	logind_ignores HandleSuspendKey || return 1
 	local keys
 	if keys="$(run_as_htpc_user busctl --user call org.kde.kglobalaccel /kglobalaccel \
 		org.kde.KGlobalAccel shortcutKeys as 4 org_kde_powerdevil Sleep "" "" 2>/dev/null)"; then
@@ -50,6 +50,38 @@ sleep_keys_ignored() {
 }
 
 check "The sleep key of a remote does not suspend the HTPC" sleep_keys_ignored
+
+logind_ignores_keys() {
+	local key
+	for key in HandlePowerKey HandleSuspendKey HandleHibernateKey HandleLidSwitch IdleAction; do
+		logind_ignores "${key}" || return 1
+	done
+}
+
+sleep_targets_masked() {
+	local target
+	for target in sleep suspend hibernate hybrid-sleep; do
+		[[ "$(systemctl is-enabled "${target}.target" 2>/dev/null)" == masked ]] || return 1
+	done
+}
+
+plasma_power_actions_off() {
+	local profile key
+	for profile in AC Battery LowBattery; do
+		for key in PowerButtonAction LidAction AutoSuspendAction; do
+			[[ "$(kreadconfig6 --file "${home}/.config/powerdevilrc" --group "${profile}" \
+				--group SuspendAndShutdown --key "${key}")" == 0 ]] || return 1
+		done
+		for key in DimDisplayWhenIdle TurnOffDisplayWhenIdle; do
+			[[ "$(kreadconfig6 --file "${home}/.config/powerdevilrc" --group "${profile}" \
+				--group Display --key "${key}")" == false ]] || return 1
+		done
+	done
+}
+
+check "logind ignores the power, sleep and lid keys and the idle time" logind_ignores_keys
+check "The sleep targets are masked, so nothing suspends the HTPC" sleep_targets_masked
+check "Plasma does nothing at the power button, the lid or the idle time, and keeps the screen on" plasma_power_actions_off
 
 kwin_composes_fullscreen() {
 	grep -qx "KWIN_DRM_NO_DIRECT_SCANOUT=1" "${home}/.config/environment.d/x86-linux-htpc-kwin.conf"

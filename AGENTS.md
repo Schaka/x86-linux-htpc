@@ -38,6 +38,7 @@ The skills are in `.agents/skills/`, in the [Agent Skills](https://agentskills.i
 | `upgrade-stack` | Upgrade the kernel, FFmpeg, libplacebo, CB1 and mpv in the right order when a new kernel or a new libreelec-x86-DV commit is out |
 | `update-cb1` | Take a new CB1 version into the build and the mpv patches |
 | `setup-htpc` | Set up the HTPC on the machine of a user: ask the questions, run `setup.sh`, guide the steps at the TV |
+| `power-key` | Set up the power key of a remote for the TV and the AV receiver, and find the commands of the devices |
 | `home-assistant` | Build the TV and video scripts in the Home Assistant of a user |
 | `test-setup` | Test `setup.sh` and the install on a fresh Fedora system in a container or a virtual machine |
 | `android-app-settings` | Find a setting of an Android app in its APK, and make the component `android-apps` write it |

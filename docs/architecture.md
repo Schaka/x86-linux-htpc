@@ -63,6 +63,7 @@ CB1 is the open-source Dolby Vision engine of libreelec-x86-DV. Its project uses
 1. The user presses a key on a USB remote or an air mouse.
 2. For an air mouse, a service turns OK and Back into a click, Enter or Back.
 3. The program in front receives the key: Plasma Bigscreen, an app, Kodi, or a helper of the CB1 mpv that reads the keys while the VT of mpv is in front.
+4. The power key goes to a service that turns the TV and the AV receiver on or off. The HTPC stays on. [power-key.md](power-key.md) has the details.
 
 HDMI-CEC from the TV remote is a design without a component yet. [cec.md](cec.md) has the details.
 

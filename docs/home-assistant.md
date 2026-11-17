@@ -107,6 +107,10 @@ rest_command:
 
 The session gets a new ID at each start of the shim. A GET request to `/Sessions` with the same header lists the sessions. The script picks the entry with the right `DeviceName`, the value of `JELLYFIN_PLAYER_NAME` or the host name.
 
+## The power key of the remote
+
+The component `power-key` can send the power key of the remote to a webhook of Home Assistant. An automation then turns the TV and the receiver on or off by their state, and the HTPC stays on. [power-key.md](power-key.md) shows the automation.
+
 ## A full "watch" script
 
 1. Turn on the receiver and select the input of the HTPC.

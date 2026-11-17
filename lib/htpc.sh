@@ -183,6 +183,19 @@ firewall_deny() {
 	return 0
 }
 
+# logind
+
+# The HTPC stays on at all times, so the component bigscreen makes logind
+# ignore the power key, the sleep key, the lid and the idle time. Other
+# components check the same file before they use such a key.
+# shellcheck disable=SC2034 # the components use it
+HTPC_LOGIND_DROPIN=/etc/systemd/logind.conf.d/x86-linux-htpc.conf
+
+# True if the drop-in of this project sets KEY to ignore.
+logind_ignores() {
+	grep -qx "$1=ignore" "${HTPC_LOGIND_DROPIN}" 2>/dev/null
+}
+
 # Configuration
 
 # Prints the value of KEY from the configuration file, or the default value.

@@ -13,7 +13,7 @@ The finished system does these things out of the box:
 3. It plays media from a Jellyfin server with `jellyfin-mpv-shim`. Kodi is an optional second player.
 4. It uses KDE Plasma Bigscreen as the TV interface.
 5. It runs Android TV apps for YouTube and Twitch in Waydroid.
-6. It turns the TV on over the network, and it takes the keys of an air mouse, a USB remote or a keyboard. Home Assistant can switch the TV and start videos.
+6. It turns the TV on over the network, and it takes the keys of an air mouse, a USB remote or a keyboard. The power key of the remote turns the TV and the AV receiver on and off. Home Assistant can switch the TV and start videos.
 
 The project supports Fedora officially. The scripts keep the distribution-specific parts small, so that other distributions are easy to add.
 
@@ -47,6 +47,8 @@ The project supports Fedora officially. The scripts keep the distribution-specif
 | [docs/control-api.md](docs/control-api.md) | The REST API and the DLNA renderer that start media on the HTPC and control it |
 | [docs/api.md](docs/api.md) | The paths of the REST API with fields and examples, and the link to the OpenAPI document of the newest release |
 | [docs/airplay.md](docs/airplay.md) | The AirPlay receiver for audio and screen mirroring from iPhones and Macs |
+| [docs/power-key.md](docs/power-key.md) | The power key of the remote: it turns the TV and the AV receiver on and off, with Home Assistant or with the HTPC alone |
+| [docs/device-commands.md](docs/device-commands.md) | How to find the network commands of a TV or an AV receiver, with examples for common brands |
 | [docs/home-assistant.md](docs/home-assistant.md) | Home Assistant scripts that turn the TV on and off and start a video on the HTPC |
 | [docs/cec.md](docs/cec.md) | HDMI-CEC with a USB adapter, the remote keys and the power control |
 | [docs/distributions.md](docs/distributions.md) | Fedora support, and the rules that keep the scripts portable |

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-only
 #
-# Removes the automatic login and the KWin script of the home screen. The
-# packages and the options of the user stay, because the user can also use
-# them without this project.
+# Removes the automatic login, the KWin script of the home screen and the
+# logind drop-in, and unmasks the sleep targets. The packages and the options
+# of the user stay, because the user can also use them without this project.
 set -euo pipefail
 # shellcheck source=../../lib/htpc.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../../lib/htpc.sh"
@@ -11,7 +11,10 @@ require_root
 
 remove_file /etc/plasmalogin.conf.d/x86-linux-htpc.conf
 remove_file /etc/sddm.conf.d/x86-linux-htpc.conf
-remove_file /etc/systemd/logind.conf.d/x86-linux-htpc.conf
+remove_file "${HTPC_LOGIND_DROPIN}"
+for target in sleep suspend hibernate hybrid-sleep; do
+	systemctl unmask "${target}.target" 2>/dev/null || true
+done
 remove_file "$(htpc_user_home)/.config/environment.d/x86-linux-htpc-kwin.conf"
 disable_user_service htpc-display.service
 

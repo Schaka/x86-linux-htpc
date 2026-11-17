@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 #
 # Installs Plasma Bigscreen, logs the HTPC user in to it automatically and
-# turns off the screen lock and the automatic suspend of that user. A KWin
-# script keeps the home screen in front and in focus.
+# turns off the screen lock. The HTPC stays on: no key, lid or idle time
+# suspends it or shuts it down. A KWin script keeps the home screen in
+# front and in focus.
 set -euo pipefail
 # shellcheck source=../../lib/htpc.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../../lib/htpc.sh"
@@ -45,7 +46,6 @@ configure_user_session() {
 	run_as_htpc_user kwriteconfig6 --file kwalletrc --group Wallet --key Enabled false
 	run_as_htpc_user kwriteconfig6 --file kscreenlockerrc --group Daemon --key Autolock false
 	run_as_htpc_user kwriteconfig6 --file kscreenlockerrc --group Daemon --key LockOnResume false
-	run_as_htpc_user kwriteconfig6 --file powerdevilrc --group AC --group SuspendAndShutdown --key AutoSuspendAction 0
 }
 
 # The pointer of an air mouse often reaches a corner of the screen by
@@ -93,21 +93,72 @@ reload_edge_effects() {
 	done
 }
 
-# The power key of many remotes sends the sleep key. A suspended HTPC
-# takes no cast, and some boards do not wake up from a USB remote. So the
-# sleep and hibernate keys do nothing: in Plasma, and in logind when Plasma
-# does not run.
-ignore_sleep_keys() {
-	local generated key
+# The HTPC stays on at all times. A suspended HTPC takes no cast, and some
+# boards do not wake up from a USB remote. The power key of many remotes
+# sends the sleep key, and the power button of the board sends the power
+# key, which makes Plasma show a shutdown prompt that a remote can confirm.
+# So the keys, the lid and the idle time do nothing in logind, which also
+# covers the time that Plasma does not run. logind reads the file at its
+# next start, and Plasma already ignores the keys until then.
+ignore_power_keys_in_logind() {
+	local generated
 	generated="$(mktemp)"
 	cat >"${generated}" <<CONF
 # Written by the component bigscreen of x86-linux-htpc.
 [Login]
+HandlePowerKey=ignore
+HandlePowerKeyLongPress=ignore
 HandleSuspendKey=ignore
 HandleHibernateKey=ignore
+HandleLidSwitch=ignore
+HandleLidSwitchExternalPower=ignore
+HandleLidSwitchDocked=ignore
+IdleAction=ignore
 CONF
-	install_file "${generated}" /etc/systemd/logind.conf.d/x86-linux-htpc.conf
+	install_file "${generated}" "${HTPC_LOGIND_DROPIN}"
 	rm -f "${generated}"
+}
+
+# No program can suspend or hibernate the system through a masked target.
+mask_sleep_targets() {
+	local target
+	for target in sleep suspend hibernate hybrid-sleep; do
+		[[ "$(systemctl is-enabled "${target}.target" 2>/dev/null || true)" == masked ]] && continue
+		systemctl mask "${target}.target" >/dev/null
+		info "Masked ${target}.target"
+	done
+}
+
+# Sets a key of powerdevilrc for the HTPC user. The exit code is 0 if the
+# value changed.
+set_powerdevil_option() {
+	local profile="$1" section="$2" key="$3" value="$4"
+	[[ "$(run_as_htpc_user kreadconfig6 --file powerdevilrc --group "${profile}" --group "${section}" \
+		--key "${key}")" != "${value}" ]] || return 1
+	run_as_htpc_user kwriteconfig6 --file powerdevilrc --group "${profile}" --group "${section}" \
+		--key "${key}" "${value}"
+}
+
+# Plasma asks what to do at the power button, and the value 0 means nothing.
+# The screen stays on too: it neither dims nor turns off when idle.
+turn_off_plasma_power_actions() {
+	local profile key changed=no
+	for profile in AC Battery LowBattery; do
+		for key in PowerButtonAction LidAction AutoSuspendAction; do
+			if set_powerdevil_option "${profile}" SuspendAndShutdown "${key}" 0; then changed=yes; fi
+		done
+		for key in DimDisplayWhenIdle TurnOffDisplayWhenIdle; do
+			if set_powerdevil_option "${profile}" Display "${key}" false; then changed=yes; fi
+		done
+	done
+	# PowerDevil reads its configuration at its start.
+	if [[ "${changed}" == yes ]]; then
+		run_as_htpc_user systemctl --user restart plasma-powerdevil.service 2>/dev/null || true
+	fi
+}
+
+ignore_sleep_shortcuts() {
+	local key
 	for key in Sleep Hibernate; do
 		run_as_htpc_user busctl --user call org.kde.kglobalaccel /kglobalaccel org.kde.KGlobalAccel \
 			setForeignShortcutKeys "asa(ai)" 4 org_kde_powerdevil "${key}" "" "" 0 2>/dev/null ||
@@ -204,7 +255,10 @@ install_packages "${component_dir}"
 install_autologin
 configure_user_session
 disable_screen_edges
-ignore_sleep_keys
+ignore_power_keys_in_logind
+mask_sleep_targets
+turn_off_plasma_power_actions
+ignore_sleep_shortcuts
 install_kwin_environment
 install_kwin_script
 install_display_service

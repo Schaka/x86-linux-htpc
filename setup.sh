@@ -64,6 +64,9 @@ SETUP_REMOTE|The remote: air-mouse for a 2.4 GHz air mouse that sends OK and Bac
 AIR_MOUSE_USB_IDS|The USB IDs of the air mouse receivers as VENDOR:PRODUCT, separated by spaces.|@detect_air_mouse|
 SCREEN_EDGES|Actions in the screen corners of KWin: off stops the overview that a pointer in a corner opens.|off|on off
 WAKE_ON_LAN_MACS|The MAC addresses of the TV for Wake-on-LAN, separated by spaces. Empty: no network wake.||
+SETUP_POWER_KEY|Turn the TV and the AV receiver on and off with the power key of the remote? The HTPC itself stays on. The power key of an air mouse sends the sleep key.|no|yes no
+POWER_WEBHOOK_URL|The address of a Home Assistant webhook that gets the power key, for example http://192.0.2.10:8123/api/webhook/ID. Empty: the HTPC turns the devices on and off itself.||
+POWER_OFF_COMMAND|The shell command that turns the TV and the AV receiver off, for example a curl call to the network API of the receiver. Empty: no way to turn off. Wake-on-LAN turns the devices on.||
 SETUP_BUILD|Build the missing CB1, Kodi and kernel packages on this machine now? This takes hours. no: put them into CB1_BUILD_DIR and KERNEL_PACKAGES_DIR yourself.|yes|yes no
 CB1_BUILD_DIR|The folder for the archives of the CB1 build and of Kodi.|/var/tmp/htpc-cb1|
 KERNEL_PACKAGES_DIR|The folder for the packages of the patched kernel.|/var/tmp/htpc-kernel|
@@ -151,6 +154,8 @@ applies() {
 	JELLYFIN_SERVER_URL | JELLYFIN_PLAYER_NAME) [[ "${answer[SETUP_JELLYFIN]}" == yes ]] ;;
 	TWITCH_PROXY_URL) [[ " ${answer[ANDROID_APPS]} " == *" s0undtv "* ]] ;;
 	AIR_MOUSE_USB_IDS) [[ "${answer[SETUP_REMOTE]}" == air-mouse ]] ;;
+	POWER_WEBHOOK_URL) [[ "${answer[SETUP_POWER_KEY]}" == yes ]] ;;
+	POWER_OFF_COMMAND) [[ "${answer[SETUP_POWER_KEY]}" == yes && -z "${answer[POWER_WEBHOOK_URL]}" ]] ;;
 	SETUP_BUILD | CB1_BUILD_DIR | KERNEL_PACKAGES_DIR)
 		[[ "${answer[SETUP_DOLBY_VISION]}" == yes || "${answer[SETUP_KODI]}" == yes ]]
 		;;
@@ -174,6 +179,18 @@ valid() {
 	DISPLAY_MODE)
 		[[ "${value}" =~ ^[0-9]+x[0-9]+@[0-9.]+$ ]] || {
 			printf 'Use WIDTHxHEIGHT@RATE, for example 3840x2160@60.\n' >&2
+			return 1
+		}
+		;;
+	POWER_WEBHOOK_URL)
+		[[ -z "${value}" || "${value}" =~ ^https?://[^[:space:]]+$ ]] || {
+			printf 'Use an address that starts with http:// or https://.\n' >&2
+			return 1
+		}
+		;;
+	POWER_OFF_COMMAND)
+		[[ "${value}" != *'"'* ]] || {
+			printf 'Use single quotes inside the command. The configuration file cannot hold a double quote.\n' >&2
 			return 1
 		}
 		;;
@@ -225,6 +242,7 @@ earlier_choice() {
 	SETUP_KODI) has kodi-dv ;;
 	SETUP_YOUTUBE) has youtube-tv ;;
 	SETUP_CONTROL) has control-api ;;
+	SETUP_POWER_KEY) has power-key ;;
 	SETUP_AIRPLAY) has airplay ;;
 	SETUP_REMOTE) [[ "$(has remote-keys)" == yes ]] && printf 'air-mouse\n' || printf 'keyboard\n' ;;
 	SETUP_AV_RECEIVER) [[ " $(config_get AUDIO_PASSTHROUGH_FORMATS) " == *" truehd "* ]] && printf 'yes\n' || printf 'no\n' ;;
@@ -327,6 +345,7 @@ plan_install() {
 	[[ "${answer[SETUP_KODI]}" == yes ]] && { list+=(kodi-dv); apps+=(htpc-kodi.desktop); }
 	[[ "${answer[SETUP_REMOTE]}" == air-mouse && -n "${answer[AIR_MOUSE_USB_IDS]}" ]] && list+=(remote-keys)
 	[[ -n "${answer[WAKE_ON_LAN_MACS]}" ]] && list+=(network-wake)
+	[[ "${answer[SETUP_POWER_KEY]}" == yes ]] && list+=(power-key)
 	[[ "${answer[SETUP_CONTROL]}" == yes ]] && list+=(control-api)
 	[[ "${answer[SETUP_AIRPLAY]}" == yes ]] && list+=(airplay)
 	app="$(browser_entry || true)"
@@ -403,6 +422,8 @@ next_steps() {
 		printf '3. The patched kernel starts once. If the system works, run sudo ./install.sh kernel-dv to keep it.\n'
 	[[ "${answer[SETUP_HOME_ASSISTANT]}" == yes ]] &&
 		printf -- '- Home Assistant: read docs/home-assistant.md.\n'
+	[[ "${answer[SETUP_POWER_KEY]}" == yes ]] &&
+		printf -- '- Power key: read docs/power-key.md. With a webhook, add the automation of Home Assistant that it shows.\n'
 	[[ "${answer[SETUP_CONTROL]}" == yes ]] &&
 		printf -- '- Control API: read docs/control-api.md. Home Assistant finds the DLNA renderer by itself.\n'
 	[[ "${answer[SETUP_AIRPLAY]}" == yes ]] &&

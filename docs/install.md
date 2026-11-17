@@ -39,7 +39,8 @@ The setup shows a default for each question. Press Enter to take it. `./setup.sh
 | `ANDROID_APPS`, `TWITCH_PROXY_URL` | Android TV apps in Waydroid, for example SmartTube and S0undTV for Twitch |
 | `SETUP_REMOTE`, `AIR_MOUSE_USB_IDS` | `air-mouse` for a remote that sends OK and Back as mouse buttons. `keyboard` for all other remotes, keyboards and mice. |
 | `SCREEN_EDGES` | `off` removes the action of the screen corners. Without it, a pointer in a corner opens the overview of KWin. |
-| `WAKE_ON_LAN_MACS` | The TV turns on at login and at each video |
+| `WAKE_ON_LAN_MACS` | The TV, and the AV receiver, turn on at login and at each video |
+| `SETUP_POWER_KEY`, `POWER_WEBHOOK_URL`, `POWER_OFF_COMMAND` | The power key of the remote turns the TV and the AV receiver on and off ([power-key.md](power-key.md)). The webhook of Home Assistant does it all. Without it, the HTPC sends Wake-on-LAN and runs the off command. |
 | `SETUP_BUILD` | Build the CB1, Kodi and kernel packages now |
 | `SETUP_CONTROL` | The control API and DLNA renderer for Home Assistant and phones ([control-api.md](control-api.md)). Default `yes`. |
 | `SETUP_AIRPLAY` | The AirPlay receiver for iPhones and Macs ([airplay.md](airplay.md)). Default `no`. |

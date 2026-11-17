@@ -1,1 +1,3 @@
-# The component needs only Python and systemd of the base system.
+# NetworkManager keeps the wake setting of the HTPC, and ethtool sets it at once.
+NetworkManager
+ethtool

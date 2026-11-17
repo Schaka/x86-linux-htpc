@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Written by the component power-key of x86-linux-htpc.
+[Unit]
+Description=Power key of a remote turns the TV and the receiver on and off (x86-linux-htpc)
+After=systemd-udevd.service
+
+[Service]
+ExecStart=/usr/local/bin/htpc-power watch
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

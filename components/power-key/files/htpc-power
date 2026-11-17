@@ -1,0 +1,349 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Turns the TV and the AV receiver on and off with the power key of a remote.
+#
+#   htpc-power watch    wait for the keys of POWER_KEYS and run "toggle". A key
+#                       that the system does not ignore, for example KEY_SEARCH,
+#                       reaches no other program.
+#   htpc-power toggle   turn on what is off, and off what is on
+#   htpc-power on       turn on
+#   htpc-power off      turn off
+#   htpc-power state    print "on" or "off", or "unknown". The exit code is 0, 1 or 2.
+#
+# Two routes, chosen by POWER_WEBHOOK_URL in /etc/x86-linux-htpc/htpc.conf:
+#
+# With a webhook, the program sends the action to Home Assistant, and Home
+# Assistant turns the devices on and off and knows their state. Before a
+# toggle or an on, the program also sends Wake-on-LAN, because Home Assistant
+# cannot always switch a TV on, for example when the player that sends
+# HDMI-CEC is off. A device that is on ignores the packet.
+#
+# Without it, the program does the work. It turns on with Wake-on-LAN and
+# POWER_ON_COMMAND, and turns off with POWER_OFF_COMMAND. A packet over the
+# network can only turn a device on, so each brand needs its own command for
+# the off. The state is the exit code of POWER_STATE_COMMAND, or else the
+# hotplug state of the HDMI output.
+#
+# The configuration file is read as data, like the other scripts of the
+# project. The commands in it are shell lines of the owner of the machine.
+import glob
+import json
+import os
+import re
+import select
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+CONFIG = os.environ.get("HTPC_CONFIG", "/etc/x86-linux-htpc/htpc.conf")
+WAKE_SENDER = "/usr/local/libexec/x86-linux-htpc/wake-devices"
+PROGRAM = "/usr/local/bin/htpc-power"
+COMMAND_TIMEOUT = 60
+WEBHOOK_TIMEOUT = 10
+# Stopping the media ends Kodi and VacuumTube, which can take a few seconds.
+STOP_MEDIA_TIMEOUT = 15
+SCAN_INTERVAL = 2.0
+# A remote repeats a held key, and an air mouse can show its key on two
+# devices for a moment. One press must start one job.
+DEBOUNCE = 1.5
+# The fixed buttons of the computer. A press on them must not turn the TV on
+# or off.
+COMPUTER_BUTTONS = {"Power Button", "Sleep Button", "cros_ec_buttons"}
+# The system ignores these keys already, so the service leaves them alone.
+# Any other key of POWER_KEYS would also act in the desktop, for example
+# KEY_SEARCH opens the search of Plasma Bigscreen. So the service takes the
+# device of the remote for itself, and passes all other events on.
+SYSTEM_IGNORED_KEYS = {"KEY_POWER", "KEY_POWER2", "KEY_SLEEP", "KEY_SUSPEND", "KEY_HIBERNATE"}
+FORWARD_SUFFIX = " (x86-linux-htpc power key)"
+# The air mouse service already passes the keys of its receivers on through
+# this device, which has the keys of a keyboard.
+REMOTE_NAMES = {"x86-linux-htpc air mouse"}
+# The text and the exit code of "state" for each result of is_on().
+STATE_RESULTS = {True: ("on", 0), False: ("off", 1), None: ("unknown", 2)}
+
+
+def log(message):
+    print(message, file=sys.stderr, flush=True)
+
+
+def read_config():
+    """The last line of a key wins. One pair of double quotes goes away, as
+    in lib/htpc.sh."""
+    values = {}
+    try:
+        with open(CONFIG) as f:
+            for line in f:
+                match = re.match(r"^\s*([A-Z][A-Z0-9_]*)=(.*)$", line.rstrip("\n"))
+                if match:
+                    value = match.group(2).strip()
+                    value = value[:-1] if value.endswith('"') else value
+                    value = value[1:] if value.startswith('"') else value
+                    values[match.group(1)] = value
+    except OSError:
+        pass
+    return values
+
+
+def run_command(command, quiet=False):
+    """Runs a shell line of the owner. True means exit code 0."""
+    output = subprocess.DEVNULL if quiet else None
+    try:
+        return subprocess.run(command, shell=True, stdout=output, timeout=COMMAND_TIMEOUT).returncode == 0
+    except subprocess.TimeoutExpired:
+        log(f"The command did not end in {COMMAND_TIMEOUT} seconds.")
+        return False
+
+
+def post(url, body, timeout):
+    request = urllib.request.Request(
+        url, data=body, method="POST", headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=timeout):
+        pass
+
+
+def send_webhook(url, action):
+    # The webhook ID in the address works like a password, so the log shows
+    # no address.
+    if not re.match(r"^https?://\S+$", url):
+        log("POWER_WEBHOOK_URL must start with http:// or https://.")
+        return False
+    try:
+        post(url, json.dumps({"action": action}).encode(), WEBHOOK_TIMEOUT)
+    except (urllib.error.URLError, OSError) as error:
+        log(f"The webhook failed: {getattr(error, 'reason', error)}")
+        return False
+    return True
+
+
+def hdmi_connected(output):
+    if not re.match(r"^[A-Za-z0-9-]+$", output):
+        return None
+    paths = glob.glob(f"/sys/class/drm/card*-{output}/status")
+    if not paths:
+        return None
+    try:
+        return any(Path(path).read_text().strip() == "connected" for path in paths)
+    except OSError:
+        return None
+
+
+def is_on(config):
+    """True, False, or None when the state is not known."""
+    command = config.get("POWER_STATE_COMMAND", "")
+    if command:
+        return run_command(command, quiet=True)
+    return hdmi_connected(config.get("HDMI_OUTPUT", "HDMI-A-1"))
+
+
+def stop_media(config):
+    """A video must not play on to a TV that is off. The control API is
+    optional, so a failure is not an error."""
+    port = config.get("CONTROL_API_PORT", "8780")
+    if config.get("POWER_STOP_MEDIA", "yes") != "yes" or not port.isdigit():
+        return
+    try:
+        post(f"http://127.0.0.1:{port}/api/v1/home", b"", STOP_MEDIA_TIMEOUT)
+    except (urllib.error.URLError, OSError):
+        pass
+
+
+def can_wake(config):
+    return os.access(WAKE_SENDER, os.X_OK) and bool(config.get("WAKE_ON_LAN_MACS", ""))
+
+
+def send_wake(config):
+    return can_wake(config) and subprocess.run([WAKE_SENDER]).returncode == 0
+
+
+def turn_on(config):
+    command = config.get("POWER_ON_COMMAND", "")
+    if not can_wake(config) and not command:
+        log("WAKE_ON_LAN_MACS and POWER_ON_COMMAND are empty, so nothing turns on.")
+        return False
+    ok = True
+    if can_wake(config):
+        ok = send_wake(config)
+    if command:
+        ok = run_command(command) and ok
+    return ok
+
+
+def turn_off(config):
+    command = config.get("POWER_OFF_COMMAND", "")
+    if not command:
+        log("POWER_OFF_COMMAND is empty, so nothing turns off.")
+        return False
+    stop_media(config)
+    return run_command(command)
+
+
+def act(action):
+    config = read_config()
+    url = config.get("POWER_WEBHOOK_URL", "")
+    if url:
+        if action != "off" and config.get("POWER_WEBHOOK_WAKE", "yes") == "yes":
+            send_wake(config)
+        return send_webhook(url, action)
+    if action == "toggle":
+        state = is_on(config)
+        if state is None:
+            log("The power state is not known, so the key turns on.")
+        action = "off" if state else "on"
+    return turn_on(config) if action == "on" else turn_off(config)
+
+
+def print_state():
+    text, exit_code = STATE_RESULTS[is_on(read_config())]
+    print(text)
+    return exit_code
+
+
+class Watcher:
+    def __init__(self, evdev, key_codes, user, swallowed_codes=frozenset()):
+        self.evdev = evdev
+        # What can go wrong at the virtual device. Old versions of python-evdev
+        # have no UInputError, and then only OSError is possible.
+        self.uinput_errors = (OSError, getattr(evdev, "UInputError", OSError))
+        self.key_codes = key_codes
+        # The keys that no other program may see.
+        self.swallowed_codes = swallowed_codes
+        self.user = user
+        self.devices = {}
+        # The virtual device that passes the events of a taken device on.
+        self.forwards = {}
+        self.job = None
+        self.last_press = 0.0
+        self.next_scan = 0.0
+
+    def offers_key(self, device):
+        keys = device.capabilities().get(self.evdev.ecodes.EV_KEY, [])
+        return (device.name not in COMPUTER_BUTTONS and not device.name.endswith(FORWARD_SUFFIX)
+                and any(code in keys for code in self.key_codes))
+
+    def should_take(self, device):
+        """A remote that offers a swallowed key. A keyboard stays free, because
+        a keyboard with a search key must keep it."""
+        keys = device.capabilities().get(self.evdev.ecodes.EV_KEY, [])
+        if not any(code in keys for code in self.swallowed_codes):
+            return False
+        is_keyboard = self.evdev.ecodes.KEY_A in keys
+        return not is_keyboard or device.name in REMOTE_NAMES
+
+    def take(self, device):
+        """Takes the device for the service. If it fails, the service only
+        watches the device. The virtual device must exist before the grab,
+        because a grabbed device without it would lose all its keys."""
+        try:
+            forward = self.evdev.UInput.from_device(device, name=device.name + FORWARD_SUFFIX)
+        except self.uinput_errors as error:
+            log(f"The device {device.name} stays free: {error}")
+            return
+        try:
+            device.grab()
+        except OSError as error:
+            forward.close()
+            log(f"The device {device.name} stays free: {error}")
+            return
+        self.forwards[device.path] = forward
+
+    def scan(self):
+        self.next_scan = time.monotonic() + SCAN_INTERVAL
+        for path in self.evdev.list_devices():
+            if path in self.devices:
+                continue
+            try:
+                device = self.evdev.InputDevice(path)
+            except OSError:
+                continue
+            # A receiver that the air mouse service has taken is busy, so the
+            # watcher reads the key from the virtual device of that service.
+            if self.offers_key(device):
+                self.devices[path] = device
+                if self.should_take(device):
+                    self.take(device)
+            else:
+                device.close()
+
+    def pressed(self):
+        now = time.monotonic()
+        if self.job is not None and self.job.poll() is None:
+            return
+        if now - self.last_press < DEBOUNCE:
+            return
+        self.last_press = now
+        # The commands of the owner run as the user of the session, not as
+        # root.
+        self.job = subprocess.Popen(["runuser", "-u", self.user, "--", PROGRAM, "toggle"])
+
+    def handle(self, event, path=None):
+        ecodes = self.evdev.ecodes
+        if event.type == ecodes.EV_KEY and event.value == 1 and event.code in self.key_codes:
+            self.pressed()
+        forward = self.forwards.get(path)
+        if forward is None:
+            return
+        if event.type == ecodes.EV_KEY and event.code in self.swallowed_codes:
+            return
+        if event.type == ecodes.EV_SYN:
+            forward.syn()
+        else:
+            forward.write(event.type, event.code, event.value)
+
+    def drop(self, device):
+        del self.devices[device.path]
+        forward = self.forwards.pop(device.path, None)
+        if forward is not None:
+            forward.close()
+        device.close()
+
+    def run(self):
+        while True:
+            if time.monotonic() >= self.next_scan:
+                self.scan()
+            timeout = max(0.0, self.next_scan - time.monotonic())
+            ready, _, _ = select.select(list(self.devices.values()), [], [], timeout)
+            for device in ready:
+                try:
+                    for event in device.read():
+                        self.handle(event, device.path)
+                except OSError:
+                    # The remote was unplugged.
+                    self.drop(device)
+            if self.job is not None:
+                self.job.poll()
+
+
+def watch():
+    import evdev  # Only the service needs it.
+
+    config = read_config()
+    user = config.get("HTPC_USER", "")
+    names = config.get("POWER_KEYS", "KEY_SLEEP").split()
+    if not user:
+        sys.exit("HTPC_USER is empty.")
+    unknown = [name for name in names if name not in evdev.ecodes.ecodes]
+    if unknown:
+        sys.exit(f"POWER_KEYS has unknown keys: {' '.join(unknown)}")
+    codes = {evdev.ecodes.ecodes[name] for name in names}
+    swallowed = {evdev.ecodes.ecodes[name] for name in names if name not in SYSTEM_IGNORED_KEYS}
+    Watcher(evdev, codes, user, swallowed).run()
+
+
+def main():
+    command = sys.argv[1] if len(sys.argv) == 2 else ""
+    if command == "watch":
+        watch()
+    elif command == "state":
+        sys.exit(print_state())
+    elif command in ("on", "off", "toggle"):
+        sys.exit(0 if act(command) else 1)
+    else:
+        sys.exit("Usage: htpc-power watch|toggle|on|off|state")
+
+
+if __name__ == "__main__":
+    main()

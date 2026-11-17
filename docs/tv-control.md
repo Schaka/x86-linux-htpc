@@ -56,7 +56,7 @@ The TV interfaces move a focus frame with the arrow keys, and there OK must be E
 
 A hand never holds the remote still, so a movement counts only above a small distance. The CB1 mpv on its own VT has no window system. Its script `htpc-screen.run` gives mpv the pointer movement and the clicks, and draws a pointer on the OSD. Only a movement above the same small distance shows the pointer. The pointer goes away 5 seconds after the last such movement, or at an arrow key. While the pointer is off, the script gives mpv no movement, because mpv shows the controls of the player at each mouse movement.
 
-The component `bigscreen` makes the sleep key do nothing, so the power key of such a remote does not suspend the HTPC. A suspended HTPC takes no cast, and some boards do not wake up from a USB remote.
+The component `bigscreen` makes the sleep key do nothing, so the power key of such a remote does not suspend the HTPC. A suspended HTPC takes no cast, and some boards do not wake up from a USB remote. The component `power-key` uses this key to turn the TV and the AV receiver on and off. [power-key.md](power-key.md) describes it.
 
 ## Network control
 
@@ -76,7 +76,9 @@ The component `network-wake` does the first step. It sends a Wake-on-LAN packet 
 | At the start of each video in `jellyfin-mpv-shim` | The mpv script `htpc-wake.lua`, for both mpv programs. A cast then turns on a TV in standby. |
 | At the start of each video in VacuumTube | The launcher of the component `youtube-tv`. A cast from the YouTube app of a phone then turns on a TV in standby. |
 
-The packet goes to the broadcast address of the LAN on the UDP ports 9 and 7, three times. A device that is on ignores it. The receiver and the input stay with the home automation system, because each brand has its own API.
+The packet goes to the broadcast address of the LAN on the UDP ports 9 and 7, three times. A device that is on ignores it.
+
+The component also turns on the network wake of the HTPC itself, so that another device can wake the HTPC. `HTPC_WAKE_ON_LAN=no` leaves the network cards alone. After a power-off, many boards cut the power of the USB ports. Then a card in a USB dock cannot wake the HTPC, and only a built-in network card can. The receiver and the input stay with the home automation system, because each brand has its own API. The power key of a remote uses these packets for the on step, and a command or Home Assistant for the off step: [power-key.md](power-key.md).
 
 ## Remote keys without CEC
 
