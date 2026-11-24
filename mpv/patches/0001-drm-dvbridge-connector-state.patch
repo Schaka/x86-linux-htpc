@@ -15,9 +15,14 @@ turns DVBRIDGE_DV_STANDARD_LAB, DVBRIDGE_HDR10_DEEP_COLOR and
 CB1_LLDV_FORMAT off when it takes the display. With --drm-dvbridge, it
 sets them back to 0 at the end, not to the values that it found.
 
+Such an owner also leaves "max bpc" at the 8 bits of Dolby Vision, and a
+compositor keeps it. Without --drm-dvbridge, the DRM output sets "max bpc"
+to the top of its range when it takes the display. With --drm-dvbridge,
+it sets "max bpc" to the top of its range at the end.
+
 License: the license of mpv.
 diff --git a/video/out/drm_atomic.c b/video/out/drm_atomic.c
-index ffdaa39..0fbc2cf 100644
+index ffdaa39..eeaed76 100644
 --- a/video/out/drm_atomic.c
 +++ b/video/out/drm_atomic.c
 @@ -17,6 +17,7 @@
@@ -28,7 +33,7 @@ index ffdaa39..0fbc2cf 100644
  
  #include "common/common.h"
  #include "common/msg.h"
-@@ -404,6 +405,161 @@ bool drm_atomic_save_old_state(struct drm_atomic_context *ctx)
+@@ -404,6 +405,183 @@ bool drm_atomic_save_old_state(struct drm_atomic_context *ctx)
      return ret;
  }
  
@@ -52,6 +57,21 @@ index ffdaa39..0fbc2cf 100644
 +    return false;
 +}
 +
++static bool drm_object_range_max(struct drm_object *object, const char *name,
++                                 uint64_t *value)
++{
++    for (int i = 0; i < object->props->count_props; i++) {
++        drmModePropertyRes *info = object->props_info[i];
++        if (strcmp(info->name, name))
++            continue;
++        if (!(info->flags & DRM_MODE_PROP_RANGE) || info->count_values < 2)
++            return false;
++        *value = info->values[1];
++        return true;
++    }
++    return false;
++}
++
 +// TV-led Dolby Vision carries its metadata in the pixels of the picture.
 +// The kernel sends the Dolby Vision packet while DVBRIDGE_DV_STANDARD_LAB
 +// is 1, and the pixels must reach the HDMI link unchanged: 8 bits for each
@@ -69,26 +89,22 @@ index ffdaa39..0fbc2cf 100644
 +        uint64_t value;
 +        const char *enum_name;
 +        bool required;
-+        // Restore 0, not the old value. The blob of the old owner can be
-+        // gone at the restore, and the next owner sets its own blobs anyway.
-+        // A CB1 transport that is on at the start belongs to an owner that
-+        // ended without its restore, so it must go off at the end.
-+        bool restore_zero;
++        enum drm_atomic_restore restore;
 +    } settings[] = {
-+        {ctx->connector, "DVBRIDGE_DV_STANDARD_LAB", !hdr10, NULL, !hdr10, true},
-+        {ctx->connector, "DVBRIDGE_HDR10_DEEP_COLOR", 0, NULL, hdr10, true},
-+        {ctx->connector, "CB1_LLDV_FORMAT", 0, NULL, false, true},
-+        {ctx->connector, "HDR_OUTPUT_METADATA", 0, NULL, false, true},
-+        {ctx->connector, "max bpc", hdr10 ? 10 : 8, NULL, true, false},
-+        {ctx->connector, "Broadcast RGB", 0, "Full", true, false},
-+        {ctx->connector, "Colorspace", 0, "Default", true, false},
-+        {ctx->crtc, "CTM", 0, NULL, false, true},
-+        {ctx->crtc, "GAMMA_LUT", 0, NULL, false, true},
-+        {ctx->crtc, "DEGAMMA_LUT", 0, NULL, false, true},
-+        {ctx->draw_plane, "rotation", DRM_MODE_ROTATE_0, NULL, false, false},
-+        {ctx->draw_plane, "alpha", 0xffff, NULL, false, false},
-+        {ctx->draw_plane, "pixel blend mode", 0, "None", false, false},
-+        {ctx->draw_plane, "COLOR_PIPELINE", 0, NULL, false, false},
++        {ctx->connector, "DVBRIDGE_DV_STANDARD_LAB", !hdr10, NULL, !hdr10, DRM_ATOMIC_RESTORE_ZERO},
++        {ctx->connector, "DVBRIDGE_HDR10_DEEP_COLOR", 0, NULL, hdr10, DRM_ATOMIC_RESTORE_ZERO},
++        {ctx->connector, "CB1_LLDV_FORMAT", 0, NULL, false, DRM_ATOMIC_RESTORE_ZERO},
++        {ctx->connector, "HDR_OUTPUT_METADATA", 0, NULL, false, DRM_ATOMIC_RESTORE_ZERO},
++        {ctx->connector, "max bpc", hdr10 ? 10 : 8, NULL, true, DRM_ATOMIC_RESTORE_MAX},
++        {ctx->connector, "Broadcast RGB", 0, "Full", true, DRM_ATOMIC_RESTORE_OLD},
++        {ctx->connector, "Colorspace", 0, "Default", true, DRM_ATOMIC_RESTORE_OLD},
++        {ctx->crtc, "CTM", 0, NULL, false, DRM_ATOMIC_RESTORE_ZERO},
++        {ctx->crtc, "GAMMA_LUT", 0, NULL, false, DRM_ATOMIC_RESTORE_ZERO},
++        {ctx->crtc, "DEGAMMA_LUT", 0, NULL, false, DRM_ATOMIC_RESTORE_ZERO},
++        {ctx->draw_plane, "rotation", DRM_MODE_ROTATE_0, NULL, false, DRM_ATOMIC_RESTORE_OLD},
++        {ctx->draw_plane, "alpha", 0xffff, NULL, false, DRM_ATOMIC_RESTORE_OLD},
++        {ctx->draw_plane, "pixel blend mode", 0, "None", false, DRM_ATOMIC_RESTORE_OLD},
++        {ctx->draw_plane, "COLOR_PIPELINE", 0, NULL, false, DRM_ATOMIC_RESTORE_OLD},
 +    };
 +    mp_assert(MP_ARRAY_SIZE(settings) <= DRM_ATOMIC_DVBRIDGE_MAX);
 +
@@ -111,18 +127,25 @@ index ffdaa39..0fbc2cf 100644
 +        }
 +        if (drm_object_set_property(request, settings[i].object, name, value) < 0)
 +            return false;
++        uint64_t restore_value = current;
++        if (settings[i].restore == DRM_ATOMIC_RESTORE_ZERO)
++            restore_value = 0;
++        else if (settings[i].restore == DRM_ATOMIC_RESTORE_MAX)
++            drm_object_range_max(settings[i].object, name, &restore_value);
 +        old->dvbridge[old->num_dvbridge++] = (struct drm_atomic_saved_value) {
-+            settings[i].object, settings[i].name, settings[i].restore_zero ? 0 : current,
++            settings[i].object, settings[i].name, restore_value,
 +        };
 +    }
 +
 +    return true;
 +}
 +
-+// The kernel keeps a CB1 transport on after its owner ends without the
-+// restore, for example after a crash. A compositor does not know these
++// The kernel keeps the CB1 state after its owner ends without the restore,
++// for example after a crash. A compositor does not know the transport
 +// properties and keeps them, so the TV gets a Dolby Vision signal with
-+// normal pixels. Without --drm-dvbridge, mpv turns them off.
++// normal pixels. A compositor also keeps "max bpc" at the 8 bits of
++// Dolby Vision, so HDR10 gets an 8-bit link. Without --drm-dvbridge, mpv
++// turns the transports off and sets "max bpc" to the top of its range.
 +bool drm_atomic_stage_dvbridge_off(drmModeAtomicReqPtr request, struct drm_atomic_context *ctx)
 +{
 +    static const char *const transports[] = {
@@ -136,6 +159,10 @@ index ffdaa39..0fbc2cf 100644
 +        if (drm_object_set_property(request, ctx->connector, name, 0) < 0)
 +            return false;
 +    }
++    uint64_t max_bpc;
++    if (drm_object_range_max(ctx->connector, "max bpc", &max_bpc) &&
++        drm_object_set_property(request, ctx->connector, "max bpc", max_bpc) < 0)
++        return false;
 +    return true;
 +}
 +
@@ -191,14 +218,27 @@ index ffdaa39..0fbc2cf 100644
  {
      if (!ctx->old_state.saved)
 diff --git a/video/out/drm_atomic.h b/video/out/drm_atomic.h
-index 499aa33..f560fec 100644
+index 499aa33..26f06b5 100644
 --- a/video/out/drm_atomic.h
 +++ b/video/out/drm_atomic.h
-@@ -43,6 +43,14 @@ struct drm_atomic_plane_state {
+@@ -43,6 +43,27 @@ struct drm_atomic_plane_state {
      uint64_t zpos;
  };
  
 +#define DRM_ATOMIC_DVBRIDGE_MAX 16
++
++// The value that a CB1 setting gets at the end. A value that is on at the
++// start can belong to an owner that ended without its restore, for example
++// after a crash, so the CB1 transports and the depth do not go back to it.
++enum drm_atomic_restore {
++    DRM_ATOMIC_RESTORE_OLD,
++    // The blob of the old owner can be gone at the restore, and the next
++    // owner sets its own blobs anyway.
++    DRM_ATOMIC_RESTORE_ZERO,
++    // The top of the range is the kernel default. The kernel picks the
++    // deepest link that fits below it.
++    DRM_ATOMIC_RESTORE_MAX,
++};
 +
 +struct drm_atomic_saved_value {
 +    struct drm_object *object;
@@ -209,7 +249,7 @@ index 499aa33..f560fec 100644
  // Used to store the restore state for VT switching and uninit
  struct drm_atomic_state {
      bool saved;
-@@ -56,6 +64,9 @@ struct drm_atomic_state {
+@@ -56,6 +77,9 @@ struct drm_atomic_state {
      } crtc;
      struct drm_atomic_plane_state draw_plane;
      struct drm_atomic_plane_state drmprime_video_plane;
@@ -219,7 +259,7 @@ index 499aa33..f560fec 100644
  };
  
  struct drm_object {
-@@ -92,6 +103,12 @@ struct drm_atomic_context *drm_atomic_create_context(struct mp_log *log, int fd,
+@@ -92,6 +116,12 @@ struct drm_atomic_context *drm_atomic_create_context(struct mp_log *log, int fd,
  void drm_atomic_destroy_context(struct drm_atomic_context *ctx);
  
  bool drm_atomic_save_old_state(struct drm_atomic_context *ctx);
@@ -233,7 +273,7 @@ index 499aa33..f560fec 100644
  
  bool drm_mode_ensure_blob(int fd, struct drm_mode *mode);
 diff --git a/video/out/drm_common.c b/video/out/drm_common.c
-index ffc5ebf..25b2ec6 100644
+index ffc5ebf..288c2e4 100644
 --- a/video/out/drm_common.c
 +++ b/video/out/drm_common.c
 @@ -104,6 +104,8 @@ const struct m_sub_options drm_conf = {
@@ -256,7 +296,7 @@ index ffc5ebf..25b2ec6 100644
 +    }
 +
 +    if (!drm->opts->dvbridge && !drm_atomic_stage_dvbridge_off(request, atomic_ctx)) {
-+        MP_ERR(drm, "Could not turn off the CB1 transport of an earlier owner\n");
++        MP_ERR(drm, "Could not reset the CB1 state of an earlier owner\n");
 +        goto err;
 +    }
 +
