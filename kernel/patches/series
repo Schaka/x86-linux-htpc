@@ -43,3 +43,4 @@ upstream projects/Generic/patches/linux/linux-9943-intel-hdmi-scdc-diagnostics.p
 upstream projects/Generic/patches/linux/linux-9944-intel-hdmi-deferred-link-check.patch e73a5a3c32a8a83781dcf693bf6f096921526b910ab7373a17ddde8b62bb425b
 upstream projects/Generic/patches/linux/linux-9945-lldv-format-lab.patch b44fb2b3c825ee0ae4757c3e3df92d0ef2e9836b0813c5591e0bcc1b5fb38dc9
 upstream projects/Generic/patches/linux/linux-9948-intel-hdmi-ready-recovery.patch c10f4aa258ca6d2be95a175006389362ccfad3566cff1e892f0b162faf486780
+upstream projects/Generic/patches/linux/linux-9949-intel-hdmi-pin-out.patch cc3fed08eb2e54a3f3ddc5e4ee666cfdfe052419b15ecae3e85a59352b8823e8

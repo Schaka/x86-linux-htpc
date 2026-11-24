@@ -8,6 +8,7 @@ The stock kernel of a distribution cannot send Dolby Vision or HDR10+ on HDMI. T
 |---|---|---|
 | Intel display (`i915`, `xe`) | `drivers/gpu/drm/i915/display/` | Dolby Vision signaling, HDR10+ metadata, a check of the HDMI link, deep color for HDR10 |
 | HDMI helpers | `drivers/video/hdmi.c`, `include/linux/hdmi.h` | The Dolby Vision vendor InfoFrame (a data packet on HDMI that describes the signal) |
+| HDMI audio | `sound/hda/codecs/hdmi/hdmi.c` | Turns the HDMI audio output back on after a change of the display link. A new display mode for a video is such a change. Only the Alder Lake-P class needs this. It includes the N-series. |
 | DRM core | `drivers/gpu/drm/drm_connector.c`, `drm_atomic_uapi.c` and others | The HDR10+ metadata property of the connector |
 | EDID modes | `drivers/gpu/drm/drm_edid.c` | Extra 3D modes |
 
