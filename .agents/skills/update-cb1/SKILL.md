@@ -72,6 +72,7 @@ First run each test with `--no-audio`, and do not ask the user yet. Read the mpv
 |---|---|---|
 | Profile 5 and profile 8.1 | `--cb1=dolby-vision --drm-dvbridge=dolby-vision --dither-depth=no` | `CB1 Dolby Vision engine started, output Dolby Vision.` |
 | Profile 7 FEL | the same and `--vd-lavc-dovi-fel` | `CB1 enhancement layer: FEL`, and no `Dolby Vision FEL` error |
+| Profile 7 MEL without an enhancement layer stream | the same and `--vd-lavc-dovi-fel` | `Dolby Vision MEL: the stream has no enhancement layer pictures`, and no `Dolby Vision FEL` error |
 | Profile 5 in the HDR10 mode | `--cb1=hdr10 --drm-dvbridge=hdr10 --drm-format=xrgb2101010` | No CB1 error. `drm_info` shows `HDR_OUTPUT_METADATA` with PQ. |
 | HDR10 and SDR | none of the CB1 options | No CB1 line. HDR10 sets `HDR_OUTPUT_METADATA`. |
 

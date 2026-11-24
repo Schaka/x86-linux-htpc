@@ -11,11 +11,14 @@
 # that order, because later patches build on earlier ones.
 #
 # Left out:
-#   0102-wifi-mt76-*, 0062-imon-*, 9901-pm-*: no relation to video
-#   linux-9920, 9921, 9925, 9930, 9946: AMD display. The project targets
-#     Intel GPUs.
+#   0102-wifi-mt76-*, 0103-wifi-mt76-*, 0104-wifi-mt76-*, 0062-imon-*,
+#     9901-pm-*: no relation to video
+#   linux-9920, 9921, 9925, 9930, 9946, 9947, 9970, 9971, 9972, 9975, 9977,
+#     9978: AMD display. The project targets Intel GPUs.
 #   linux-9950-*: support for newer Intel chips (Wildcat Lake, Panther Lake).
 #     Two of them are part of Linux 7.3 already.
+#   linux-9973, 9974, 9976: player-led Dolby Vision (LLDV) for more Intel
+#     chips and formats. The CB1 mpv has no player-led output.
 
 upstream packages/linux/patches/default/9900-i915-10bit-hack.patch 79e95885b65f08fc5509eecac8d737e25ef3e1afcbeff6b647e63f97223e15a7
 upstream projects/Generic/patches/linux/0101-drm-edid-add-half-sbs-1080p-stereo-modes.patch e15386346771ced1a127e1c0979ba38388d43cd40c363ed38d310835df821516
@@ -38,5 +41,5 @@ upstream projects/Generic/patches/linux/linux-9941-hdr10plus-presentation-contra
 local linux-9942-intel-hdr10plus-internal-recovery.patch
 upstream projects/Generic/patches/linux/linux-9943-intel-hdmi-scdc-diagnostics.patch 5d6822eb4ddbada4c9751f6c0392d86eba93d55e531e60b7819e0f8a0afffc87
 upstream projects/Generic/patches/linux/linux-9944-intel-hdmi-deferred-link-check.patch e73a5a3c32a8a83781dcf693bf6f096921526b910ab7373a17ddde8b62bb425b
-upstream projects/Generic/patches/linux/linux-9945-lldv-format-lab.patch 78ac32981ffda9cb0de8180cb1e829392f2b9eaedd46c646eefcded84ec27beb
+upstream projects/Generic/patches/linux/linux-9945-lldv-format-lab.patch b44fb2b3c825ee0ae4757c3e3df92d0ef2e9836b0813c5591e0bcc1b5fb38dc9
 upstream projects/Generic/patches/linux/linux-9948-intel-hdmi-ready-recovery.patch c10f4aa258ca6d2be95a175006389362ccfad3566cff1e892f0b162faf486780

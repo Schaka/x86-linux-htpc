@@ -7,6 +7,11 @@ timestamp is decoded, and then carries it in mp_image.dovi_el. The
 Matroska demuxer passes the hvcE configuration of the enhancement layer
 to the decoder.
 
+A profile 7 MEL stream can come without enhancement layer pictures. If a
+base layer picture has its own RPU, and the RPU shows that the picture
+needs no residual, the picture plays without an enhancement layer
+picture.
+
 License: the license of mpv (GPL-2.0-or-later for the new files).
 diff --git a/demux/demux_mkv.c b/demux/demux_mkv.c
 index 501d20e..dc101bc 100644
@@ -80,10 +85,10 @@ index f15893e..7320633 100644
  egl_wayland_opt = get_option('egl-wayland').require(
 diff --git a/video/decode/cb1_fel.c b/video/decode/cb1_fel.c
 new file mode 100644
-index 0000000..e21e281
+index 0000000..a90a751
 --- /dev/null
 +++ b/video/decode/cb1_fel.c
-@@ -0,0 +1,186 @@
+@@ -0,0 +1,232 @@
 +/*
 + * This file is part of mpv.
 + *
@@ -103,6 +108,7 @@ index 0000000..e21e281
 +
 +#include <libavutil/buffer.h>
 +#include <libavutil/dovi_meta.h>
++#include <libavutil/frame.h>
 +#include <libavutil/hwcontext.h>
 +
 +#include <dvbridge_fel.h>
@@ -116,6 +122,8 @@ index 0000000..e21e281
 +struct pending {
 +    struct mp_image *mpi;
 +    int64_t pts;
++    // The picture carries its own intact RPU.
++    bool own_rpu;
 +};
 +
 +struct mp_cb1_fel {
@@ -126,6 +134,7 @@ index 0000000..e21e281
 +    // The EL failed. The base layer plays alone until the next reset.
 +    bool failed;
 +    bool paired;
++    bool metadata_only;
 +};
 +
 +static void fail(struct mp_cb1_fel *fel, const char *reason)
@@ -220,21 +229,55 @@ index 0000000..e21e281
 +    bind_device(fel, avctx);
 +    if (fel->failed)
 +        return;
-+    bool ok = pkt ? dvbridge_fel_submit(fel->fel, pkt) : dvbridge_fel_drain(fel->fel);
-+    if (!ok)
-+        fail(fel, "the enhancement layer cannot be decoded");
++    if (pkt) {
++        if (!dvbridge_fel_submit(fel->fel, pkt))
++            fail(fel, "the enhancement layer cannot be decoded");
++        return;
++    }
++    const char *reason = NULL;
++    if (!dvbridge_fel_drain(fel->fel, &reason))
++        fail(fel, reason ? reason : "the enhancement layer cannot be decoded");
++}
++
++// FFmpeg keeps the parsed metadata of an earlier picture on a picture
++// without an RPU. Only a picture with its own intact RPU can prove that it
++// needs no EL picture.
++static bool has_own_rpu(const AVFrame *frame)
++{
++    if (frame->decode_error_flags ||
++        (frame->flags & (AV_FRAME_FLAG_CORRUPT | AV_FRAME_FLAG_DISCARD)))
++        return false;
++    const AVFrameSideData *rpu = av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_RPU_BUFFER);
++    // The RPU starts with the prefix 25, then rpu_type 2 in the upper 6 bits.
++    return rpu && rpu->size >= 5 && rpu->data[0] == 25 && (rpu->data[1] >> 2) == 2;
 +}
 +
 +void mp_cb1_fel_push(struct mp_cb1_fel *fel, AVCodecContext *avctx,
-+                     struct mp_image *mpi, int64_t pts)
++                     struct mp_image *mpi, const AVFrame *frame)
 +{
++    int64_t pts = frame->pts;
 +    bind_device(fel, avctx);
 +    if (pts == AV_NOPTS_VALUE)
 +        fail(fel, "a base layer picture has no timestamp");
 +    if (fel->num_queue >= MP_CB1_FEL_PENDING)
 +        fail(fel, "too many pictures wait for their enhancement layer");
 +    MP_TARRAY_APPEND(fel, fel->queue, fel->num_queue,
-+                     (struct pending){.mpi = mpi, .pts = pts});
++                     (struct pending){.mpi = mpi, .pts = pts,
++                                      .own_rpu = has_own_rpu(frame)});
++}
++
++// A profile 7 MEL stream can come without EL pictures. CB1 then reads the
++// RPU of the picture, and if it needs no residual, the picture plays with
++// its metadata only (result 3).
++static int take(struct mp_cb1_fel *fel, const struct pending *p, AVFrame **el)
++{
++    if (fel->failed)
++        return -1;
++    if (p->own_rpu && p->mpi->dovi_av) {
++        return dvbridge_fel_take_mel(fel->fel, p->pts, el, p->mpi->dovi_av->data,
++                                     p->mpi->dovi_av->size);
++    }
++    return dvbridge_fel_take(fel->fel, p->pts, el);
 +}
 +
 +struct mp_image *mp_cb1_fel_pop(struct mp_cb1_fel *fel, bool eof)
@@ -242,10 +285,18 @@ index 0000000..e21e281
 +    while (fel->num_queue) {
 +        struct pending p = fel->queue[0];
 +        AVFrame *el = NULL;
-+        int res = fel->failed ? -1 : dvbridge_fel_take(fel->fel, p.pts, &el);
++        int res = take(fel, &p, &el);
 +        if (res == 0 && !eof)
 +            return NULL;
 +        MP_TARRAY_REMOVE_AT(fel->queue, fel->num_queue, 0);
++        if (res == 3) {
++            if (!fel->metadata_only) {
++                MP_VERBOSE(fel, "Dolby Vision MEL: the stream has no enhancement "
++                           "layer pictures. The pictures play with their RPU.\n");
++                fel->metadata_only = true;
++            }
++            return p.mpi;
++        }
 +        if (res == 1) {
 +            p.mpi->dovi_el = av_buffer_create((uint8_t *)el, sizeof(*el),
 +                                              free_frame, NULL, 0);
@@ -272,10 +323,10 @@ index 0000000..e21e281
 +}
 diff --git a/video/decode/cb1_fel.h b/video/decode/cb1_fel.h
 new file mode 100644
-index 0000000..874dc3e
+index 0000000..dbdf6a9
 --- /dev/null
 +++ b/video/decode/cb1_fel.h
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,63 @@
 +/*
 + * This file is part of mpv.
 + *
@@ -329,17 +380,18 @@ index 0000000..874dc3e
 +void mp_cb1_fel_send(struct mp_cb1_fel *fel, AVCodecContext *avctx,
 +                     const AVPacket *pkt);
 +
-+// Takes a decoded base layer picture. pts is the timestamp of the frame in
-+// the time base of the decoder.
++// Takes a decoded base layer picture, and the frame of the decoder that it
++// comes from. The frame gives the timestamp and the RPU of the picture.
 +void mp_cb1_fel_push(struct mp_cb1_fel *fel, AVCodecContext *avctx,
-+                     struct mp_image *mpi, int64_t pts);
++                     struct mp_image *mpi, const AVFrame *frame);
 +
 +// Returns the next base layer picture with its EL picture, or NULL if the
-+// EL picture is not decoded yet. At the end of the stream (eof), pictures
-+// without an EL picture are dropped.
++// EL picture is not decoded yet. A MEL picture that needs no EL picture
++// comes without one. At the end of the stream (eof), pictures without an
++// EL picture are dropped.
 +struct mp_image *mp_cb1_fel_pop(struct mp_cb1_fel *fel, bool eof);
 diff --git a/video/decode/vd_lavc.c b/video/decode/vd_lavc.c
-index 399e1d5..75dd002 100644
+index 399e1d5..568ba19 100644
 --- a/video/decode/vd_lavc.c
 +++ b/video/decode/vd_lavc.c
 @@ -29,6 +29,7 @@
@@ -466,7 +518,7 @@ index 399e1d5..75dd002 100644
  
 +#if HAVE_CB1
 +    if (ctx->fel) {
-+        mp_cb1_fel_push(ctx->fel, avctx, mpi, ctx->pic->pts);
++        mp_cb1_fel_push(ctx->fel, avctx, mpi, ctx->pic);
 +        av_frame_unref(ctx->pic);
 +        return ret;
 +    }

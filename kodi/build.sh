@@ -145,8 +145,10 @@ kodi_patches() {
 	# key maps for remotes, the menu language and the headers-only build.
 	# The 1000 series is for the LibreELEC system.
 	printf '%s\n' "${upstream}"/packages/mediacenter/kodi/patches/9*.patch
-	# The CB1 patches of the Generic x86 project
-	printf '%s\n' "${upstream}"/projects/Generic/patches/kodi/*.patch
+	# The CB1 patches of the Generic x86 project. The two patches of the
+	# blur font style build on the patch 1002 of the 1000 series. Only a
+	# skin can use this style, and Estuary does not, so they stay out.
+	printf '%s\n' "${upstream}"/projects/Generic/patches/kodi/*.patch | grep -v -- '-blur-'
 }
 
 main() {
