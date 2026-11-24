@@ -33,7 +33,7 @@ index 7320633..eeb69a6 100644
      dependencies += [drm, libdisplay_info]
      sources += files('video/drmprime.c',
 diff --git a/video/out/drm_common.c b/video/out/drm_common.c
-index 25b2ec6..52a1f5f 100644
+index 288c2e4..4037bd9 100644
 --- a/video/out/drm_common.c
 +++ b/video/out/drm_common.c
 @@ -37,6 +37,10 @@
