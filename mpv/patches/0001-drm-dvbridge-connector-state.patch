@@ -9,9 +9,15 @@ The DRM output also turns off all other planes on its CRTC when it takes
 the display, in every mode. A compositor can leave its cursor plane on at
 a VT switch, and the cursor then stays over the picture of mpv.
 
+The kernel keeps a CB1 transport on after a player ends without its
+restore, for example after a crash. Without --drm-dvbridge, the DRM output
+turns DVBRIDGE_DV_STANDARD_LAB, DVBRIDGE_HDR10_DEEP_COLOR and
+CB1_LLDV_FORMAT off when it takes the display. With --drm-dvbridge, it
+sets them back to 0 at the end, not to the values that it found.
+
 License: the license of mpv.
 diff --git a/video/out/drm_atomic.c b/video/out/drm_atomic.c
-index ffdaa39..3da9757 100644
+index ffdaa39..0fbc2cf 100644
 --- a/video/out/drm_atomic.c
 +++ b/video/out/drm_atomic.c
 @@ -17,6 +17,7 @@
@@ -22,7 +28,7 @@ index ffdaa39..3da9757 100644
  
  #include "common/common.h"
  #include "common/msg.h"
-@@ -404,6 +405,138 @@ bool drm_atomic_save_old_state(struct drm_atomic_context *ctx)
+@@ -404,6 +405,161 @@ bool drm_atomic_save_old_state(struct drm_atomic_context *ctx)
      return ret;
  }
  
@@ -63,12 +69,15 @@ index ffdaa39..3da9757 100644
 +        uint64_t value;
 +        const char *enum_name;
 +        bool required;
-+        // The blob of the old owner can be gone at the restore. Restore no
-+        // blob, because the next owner sets its own blobs anyway.
-+        bool blob;
++        // Restore 0, not the old value. The blob of the old owner can be
++        // gone at the restore, and the next owner sets its own blobs anyway.
++        // A CB1 transport that is on at the start belongs to an owner that
++        // ended without its restore, so it must go off at the end.
++        bool restore_zero;
 +    } settings[] = {
-+        {ctx->connector, "DVBRIDGE_DV_STANDARD_LAB", !hdr10, NULL, !hdr10, false},
-+        {ctx->connector, "DVBRIDGE_HDR10_DEEP_COLOR", 0, NULL, hdr10, false},
++        {ctx->connector, "DVBRIDGE_DV_STANDARD_LAB", !hdr10, NULL, !hdr10, true},
++        {ctx->connector, "DVBRIDGE_HDR10_DEEP_COLOR", 0, NULL, hdr10, true},
++        {ctx->connector, "CB1_LLDV_FORMAT", 0, NULL, false, true},
 +        {ctx->connector, "HDR_OUTPUT_METADATA", 0, NULL, false, true},
 +        {ctx->connector, "max bpc", hdr10 ? 10 : 8, NULL, true, false},
 +        {ctx->connector, "Broadcast RGB", 0, "Full", true, false},
@@ -103,10 +112,30 @@ index ffdaa39..3da9757 100644
 +        if (drm_object_set_property(request, settings[i].object, name, value) < 0)
 +            return false;
 +        old->dvbridge[old->num_dvbridge++] = (struct drm_atomic_saved_value) {
-+            settings[i].object, settings[i].name, settings[i].blob ? 0 : current,
++            settings[i].object, settings[i].name, settings[i].restore_zero ? 0 : current,
 +        };
 +    }
 +
++    return true;
++}
++
++// The kernel keeps a CB1 transport on after its owner ends without the
++// restore, for example after a crash. A compositor does not know these
++// properties and keeps them, so the TV gets a Dolby Vision signal with
++// normal pixels. Without --drm-dvbridge, mpv turns them off.
++bool drm_atomic_stage_dvbridge_off(drmModeAtomicReqPtr request, struct drm_atomic_context *ctx)
++{
++    static const char *const transports[] = {
++        "DVBRIDGE_DV_STANDARD_LAB", "DVBRIDGE_HDR10_DEEP_COLOR", "CB1_LLDV_FORMAT",
++    };
++    for (int i = 0; i < MP_ARRAY_SIZE(transports); i++) {
++        uint64_t value = 0;
++        char *name = (char *)transports[i];
++        if (drm_object_get_property(ctx->connector, name, &value) < 0 || !value)
++            continue;
++        if (drm_object_set_property(request, ctx->connector, name, 0) < 0)
++            return false;
++    }
 +    return true;
 +}
 +
@@ -162,7 +191,7 @@ index ffdaa39..3da9757 100644
  {
      if (!ctx->old_state.saved)
 diff --git a/video/out/drm_atomic.h b/video/out/drm_atomic.h
-index 499aa33..e947b3c 100644
+index 499aa33..f560fec 100644
 --- a/video/out/drm_atomic.h
 +++ b/video/out/drm_atomic.h
 @@ -43,6 +43,14 @@ struct drm_atomic_plane_state {
@@ -190,12 +219,13 @@ index 499aa33..e947b3c 100644
  };
  
  struct drm_object {
-@@ -92,6 +103,11 @@ struct drm_atomic_context *drm_atomic_create_context(struct mp_log *log, int fd,
+@@ -92,6 +103,12 @@ struct drm_atomic_context *drm_atomic_create_context(struct mp_log *log, int fd,
  void drm_atomic_destroy_context(struct drm_atomic_context *ctx);
  
  bool drm_atomic_save_old_state(struct drm_atomic_context *ctx);
 +bool drm_atomic_stage_dvbridge(struct mp_log *log, drmModeAtomicReqPtr request,
 +                               struct drm_atomic_context *ctx, bool hdr10);
++bool drm_atomic_stage_dvbridge_off(drmModeAtomicReqPtr request, struct drm_atomic_context *ctx);
 +bool drm_atomic_stage_other_planes_off(struct mp_log *log, drmModeAtomicReqPtr request,
 +                                       struct drm_atomic_context *ctx);
 +bool drm_atomic_restore_dvbridge(drmModeAtomicReqPtr request, struct drm_atomic_context *ctx);
@@ -203,7 +233,7 @@ index 499aa33..e947b3c 100644
  
  bool drm_mode_ensure_blob(int fd, struct drm_mode *mode);
 diff --git a/video/out/drm_common.c b/video/out/drm_common.c
-index ffc5ebf..975a442 100644
+index ffc5ebf..25b2ec6 100644
 --- a/video/out/drm_common.c
 +++ b/video/out/drm_common.c
 @@ -104,6 +104,8 @@ const struct m_sub_options drm_conf = {
@@ -215,13 +245,18 @@ index ffc5ebf..975a442 100644
          {0},
      },
      .defaults = &(const struct drm_opts) {
-@@ -385,6 +387,17 @@ bool vo_drm_acquire_crtc(struct vo_drm_state *drm)
+@@ -385,6 +387,22 @@ bool vo_drm_acquire_crtc(struct vo_drm_state *drm)
          }
      }
  
 +    if (drm->opts->dvbridge && !drm_atomic_stage_dvbridge(drm->log, request, atomic_ctx,
 +                                       drm->opts->dvbridge == DRM_DVBRIDGE_HDR10)) {
 +        MP_ERR(drm, "Could not set the DRM state for CB1\n");
++        goto err;
++    }
++
++    if (!drm->opts->dvbridge && !drm_atomic_stage_dvbridge_off(request, atomic_ctx)) {
++        MP_ERR(drm, "Could not turn off the CB1 transport of an earlier owner\n");
 +        goto err;
 +    }
 +
@@ -233,7 +268,7 @@ index ffc5ebf..975a442 100644
      drm_object_set_property(request, atomic_ctx->draw_plane, "FB_ID",   drm->fb->id);
      drm_object_set_property(request, atomic_ctx->draw_plane, "CRTC_ID", drm->crtc_id);
      drm_object_set_property(request, atomic_ctx->draw_plane, "SRC_X",   0);
-@@ -421,6 +434,21 @@ void vo_drm_release_crtc(struct vo_drm_state *drm)
+@@ -421,6 +439,21 @@ void vo_drm_release_crtc(struct vo_drm_state *drm)
  
      bool success = true;
      struct drm_atomic_context *atomic_ctx = drm->atomic_context;
@@ -255,7 +290,7 @@ index ffc5ebf..975a442 100644
      drmModeAtomicReqPtr request = drmModeAtomicAlloc();
      if (!request) {
          MP_ERR(drm, "Failed to allocate drm atomic request\n");
-@@ -1355,9 +1383,32 @@ double vo_drm_get_display_fps(struct vo_drm_state *drm)
+@@ -1355,9 +1388,32 @@ double vo_drm_get_display_fps(struct vo_drm_state *drm)
      return mode_get_Hz(&drm->mode.mode);
  }
  
@@ -288,7 +323,7 @@ index ffc5ebf..975a442 100644
      struct mp_image_params target_params = vo_get_target_params(vo);
      if (!force_sdr && (pl_color_space_equal(&target_params.color, &drm->target_params.color) ||
          !target_params.w || !target_params.h))
-@@ -1399,6 +1450,8 @@ bool vo_drm_set_hdr_metadata(struct vo *vo, bool force_sdr)
+@@ -1399,6 +1455,8 @@ bool vo_drm_set_hdr_metadata(struct vo *vo, bool force_sdr)
      };
      drmModeCreatePropertyBlob(drm->fd, &metadata, sizeof(metadata), &drm->hdr.blob_id);
      drm_object_set_property(atomic_ctx->request, atomic_ctx->connector, "HDR_OUTPUT_METADATA", drm->hdr.blob_id);
