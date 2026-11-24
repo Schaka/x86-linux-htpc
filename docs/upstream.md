@@ -4,7 +4,7 @@ The HTPC uses many external projects. This page lists them and shows how the pro
 
 | Project | Used for | How the project gets it |
 |---|---|---|
-| [libreelec-x86-DV](https://github.com/CroqueMr/libreelec-x86-DV) | The kernel display patches, the CB1 engine and the patched Kodi, FFmpeg and libplacebo | The build scripts download a fixed commit. Patches that need a change for the distribution kernel are in this repository. |
+| [libreelec-x86-DV](https://github.com/CroqueMr/libreelec-CB1), with the GitHub name libreelec-CB1 | The kernel display patches, the CB1 engine and the patched Kodi, FFmpeg and libplacebo | The build scripts download a fixed commit, the release R1.0.1-RC3. Patches that need a change for the distribution kernel are in this repository. |
 | [jellyfin-mpv-shim](https://github.com/jellyfin/jellyfin-mpv-shim) | Cast target and player for Jellyfin | Python package or Flatpak |
 | [mpv](https://mpv.io) | Video player | Package of the distribution, and a build with CB1 and the patches in `mpv/patches/` |
 | [Kodi](https://kodi.tv) | Optional second player with CB1 | The Kodi version and the patches of libreelec-x86-DV, built by `kodi/build.sh` |

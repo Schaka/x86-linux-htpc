@@ -18,7 +18,7 @@ The patches add these properties to the HDMI connector. A player that is the DRM
 | `DVBRIDGE_DV_STANDARD_LAB` | Boolean | Turns on TV-led Dolby Vision for the next frames |
 | `HDR10PLUS_METADATA` | Blob | The HDR10+ metadata of the current frame |
 | `DVBRIDGE_HDR10_DEEP_COLOR` | Boolean | Asks for 10-bit or deeper output for HDR10 |
-| `CB1_LLDV_FORMAT` | Enumeration | The pixel format for low-latency Dolby Vision |
+| `CB1_LLDV_FORMAT` | Enumeration | The pixel format for low-latency Dolby Vision. The Alder Lake-P class has it on each HDMI connector. |
 
 The Intel patch also adds the module parameter `i915.spd_sdi`. It sets the device type that the HTPC reports to the TV. The default value 1 means "digital set-top box". Some TVs select a PC picture mode for the device type "PC".
 
