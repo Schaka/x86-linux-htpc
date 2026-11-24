@@ -73,6 +73,8 @@ The project has no CEC component yet. Network wake turns the TV on, and a USB re
 | Intel Alder Lake-N with SOF audio | SOF runs with IPC3, so no compressed format reaches the receiver. Use `AUDIO_DRIVER=hda`. |
 | Intel Alder Lake-N, 4K performance | The CB1 mpv and Kodi play 4K up to 60 Hz. The mpv of the distribution with `gpu-next` drops about half of the frames at 4K 50 and 60 Hz. VacuumTube drops about 30 % of the frames at 4K HDR 60 fps. |
 | Boards with a VBT limit of 297 MHz | 4K at 50 and 60 Hz runs only as YCbCr 4:2:0. Dolby Vision works only up to 4K 30 Hz, and HDR10 at 4K only with 8 bits. The next section shows the fix. |
+| Intel Alder Lake-N board with a VBT limit of 297 MHz and level shift 0 | With only the rate limit lifted, 4K 60 Hz RGB at 594 MHz runs, but an AV receiver drops the picture and the sound for a moment, many times in an evening. The HTPC sees no hotplug, no link change and no audio gap. With level shift 6 as well, the drops stop. |
+| Intel Alder Lake-N, 4K 60 Hz HDR | HDMI 2.0 carries 4K 60 Hz RGB with 8 bits at most, so HDR at 60 Hz has 8 bits. 4K at 24, 25 and 30 Hz has 10 bits. |
 | HDMI 2.1 (FRL) | The patch set and the tested GPUs support HDMI 2.0 rates only |
 
 ## Known air mice
@@ -93,11 +95,29 @@ The VBT (Video BIOS Table) of the firmware describes the display ports of the bo
 A low value can come from the board wiring, or the maker can set it to be safe. The board itself does not show which one applies, so try the copy as the steps describe. The kernel can load a corrected copy of the VBT from a file:
 
 1. Copy the VBT of the running kernel: `sudo cat /sys/kernel/debug/dri/0/i915_vbt > vbt.bin`.
-2. Show the limit with `kernel/vbt-hdmi-rate.py vbt.bin`. If it shows "platform maximum", the firmware sets no limit, and these steps do not apply.
-3. Write a copy with the platform maximum: `kernel/vbt-hdmi-rate.py vbt.bin vbt-hdmi.bin`.
+2. Show the limit and the level shift with `kernel/vbt-hdmi-rate.py vbt.bin`. If it shows "platform maximum", the firmware sets no limit, and these steps do not apply.
+3. Write a copy with the platform maximum: `kernel/vbt-hdmi-rate.py vbt.bin vbt-hdmi.bin`. If the level shift is below the default entry of the driver, also add `--level-shift` with that entry. The next section explains the level shift.
 4. Install the copy into `/usr/lib/firmware/`. `i915` starts from the initramfs, so add the copy to it with `install_items` in a file in `/etc/dracut.conf.d/`. Run `dracut -f`.
 5. Add the boot option `i915.vbt_firmware=` with the path of the copy relative to `/usr/lib/firmware`, for example with `grubby --update-kernel=ALL --args=`. This command changes only the kernels that are installed. On Fedora, also add the option to `/etc/kernel/cmdline` and to `GRUB_CMDLINE_LINUX` in `/etc/default/grub`, so that each kernel that you install later gets it. Without the option, the kernel keeps the firmware limit, and Dolby Vision at 4K 60 Hz fails.
 6. After the reboot, make sure that `/sys/kernel/debug/dri/0/i915_vbt` is the same as the copy.
 7. Run a 4K 60 Hz RGB mode. Read the SCDC status of the sink with `i2cget` on the DDC bus of the connector, address 0x54. With the clock and the three data channels locked, register 0x40 is 0x0f. The error counters in registers 0x50 to 0x55 stay at 0 on a clean link.
 
 If the picture fails, remove the boot option with `grubby --remove-args=` and reboot. The kernel marks itself as tainted while the option is set.
+
+### The level shift of the HDMI port
+
+The field "HDMI level shifter value" of the VBT selects an entry of the voltage swing table of the HDMI output. `i915` uses the entry of the VBT. Without a VBT value, it uses its default entry. A board with a low rate limit can also select a weak swing, which suits the low rate only. At the platform maximum, a weak swing can make the TV or the AV receiver lose the picture and the sound for a moment, while the HTPC sees no change.
+
+On the combo PHY of Intel Ice Lake to Alder Lake, which includes the N-series, the table has these entries:
+
+| Entry | Swing | De-emphasis |
+|---|---|---|
+| 0 | 450 mV | 0 dB |
+| 1 | 450 mV, 650 mV at a transition | 3.2 dB |
+| 2 | 450 mV, 850 mV at a transition | 5.5 dB |
+| 3 | 650 mV | 0 dB |
+| 4 | 650 mV, 850 mV at a transition | 2.3 dB |
+| 5 | 850 mV | 0 dB |
+| 6 | 600 mV, 850 mV at a transition | 3.0 dB. The default entry of the driver. |
+
+`kernel/vbt-hdmi-rate.py vbt.bin vbt-hdmi.bin --level-shift 6` writes a copy with the platform maximum and the default entry. Some AV receivers do not set the SCDC update flag (register 0x10) at a loss of the link, so the SCDC registers do not show every short drop.

@@ -15,7 +15,10 @@ HTPC_USER=htpc
 # The name of the HDMI output, as `kscreen-doctor --outputs` shows it.
 HDMI_OUTPUT=HDMI-A-1
 
-# The output mode at login: WIDTHxHEIGHT@RATE.
+# The output mode at login: WIDTHxHEIGHT@RATE. An HDMI 2.0 port, for
+# example of an Intel N100 class GPU, sends 3840x2160@60 in RGB with 8 bits
+# for each color. 3840x2160@30 has 10 bits, which HDR needs against
+# banding, at a lower link rate.
 DISPLAY_MODE=3840x2160@60
 
 # HDR for the Plasma desktop at login: yes or no. Plasma keeps the output in

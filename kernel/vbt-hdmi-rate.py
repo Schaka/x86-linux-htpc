@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
 #
-# Shows the HDMI rate limit in an Intel VBT (Video BIOS Table), and writes a
-# copy with the platform maximum.
+# Shows the HDMI rate limit and the HDMI level shift in an Intel VBT (Video
+# BIOS Table), and writes a copy with the platform maximum.
 #
 #   kernel/vbt-hdmi-rate.py VBT
-#   kernel/vbt-hdmi-rate.py VBT OUTPUT
+#   kernel/vbt-hdmi-rate.py VBT OUTPUT [--level-shift ENTRY]
 #
 # The firmware of a board can limit an HDMI port below the rate of the GPU.
-# i915 obeys that value. docs/hardware.md explains when a copy helps and
-# how the kernel loads it.
+# i915 obeys that value. The level shift selects the entry of the voltage
+# swing table of the HDMI output. A board with a low rate limit can also
+# select a weak swing, which is too weak for the platform maximum. With
+# --level-shift, the copy also gets another entry. docs/hardware.md
+# explains when a copy helps and how the kernel loads it.
+import argparse
 import sys
 
 # The values of the field hdmi_max_data_rate in MHz. 0 is the platform maximum.
@@ -19,9 +23,11 @@ DEVICE_TYPE_TMDS = 1 << 4
 DEVICE_TYPE_NOT_HDMI = 1 << 11
 BLOCK_GENERAL_DEFINITIONS = 2
 # hdmi_max_data_rate is in bits 5 to 7 of byte 7 of a child device, from
-# BDB version 204.
+# BDB version 204. hdmi_level_shifter_value is in bits 0 to 4 of the same
+# byte.
 RATE_BYTE = 7
 RATE_SHIFT = 5
+LEVEL_MASK = (1 << RATE_SHIFT) - 1
 CHECKSUM_OFFSET = 26
 
 
@@ -60,28 +66,45 @@ def hdmi_children(vbt):
     fail("The VBT has no child devices.")
 
 
+def arguments():
+    parser = argparse.ArgumentParser(prog="kernel/vbt-hdmi-rate.py")
+    parser.add_argument("vbt")
+    parser.add_argument("output", nargs="?")
+    parser.add_argument("--level-shift", type=int, metavar="ENTRY",
+                        help="the entry of the swing table for the copy")
+    args = parser.parse_args()
+    if args.level_shift is not None:
+        if not args.output:
+            fail("--level-shift needs an OUTPUT file.")
+        if not 0 <= args.level_shift <= LEVEL_MASK:
+            fail(f"The level shift is a number from 0 to {LEVEL_MASK}.")
+    return args
+
+
 def main():
-    if len(sys.argv) not in (2, 3):
-        fail("Usage: kernel/vbt-hdmi-rate.py VBT [OUTPUT]")
-    with open(sys.argv[1], "rb") as f:
+    args = arguments()
+    with open(args.vbt, "rb") as f:
         vbt = bytearray(f.read())
     children = hdmi_children(vbt)
     if not children:
         fail("The VBT has no HDMI port.")
     for child in children:
         rate = vbt[child + RATE_BYTE] >> RATE_SHIFT
+        level = vbt[child + RATE_BYTE] & LEVEL_MASK
         print(f"HDMI port, DVO port {vbt[child + 16]:#04x}: "
-              f"{RATES.get(rate, f'unknown value {rate}')}")
-    if len(sys.argv) == 2:
+              f"{RATES.get(rate, f'unknown value {rate}')}, level shift {level}")
+    if not args.output:
         return
     for child in children:
         old = vbt[child + RATE_BYTE]
-        vbt[child + RATE_BYTE] = old & ((1 << RATE_SHIFT) - 1)
+        level = old & LEVEL_MASK if args.level_shift is None else args.level_shift
+        vbt[child + RATE_BYTE] = level
         # Keep the byte sum of the table, so that the checksum stays valid.
         vbt[CHECKSUM_OFFSET] = (vbt[CHECKSUM_OFFSET] + old - vbt[child + RATE_BYTE]) & 0xFF
-    with open(sys.argv[2], "wb") as f:
+    with open(args.output, "wb") as f:
         f.write(vbt)
-    print(f"Wrote {sys.argv[2]} with the platform maximum for each HDMI port.")
+    print(f"Wrote {args.output} with the platform maximum for each HDMI port"
+          + ("." if args.level_shift is None else f" and level shift {args.level_shift}."))
 
 
 if __name__ == "__main__":

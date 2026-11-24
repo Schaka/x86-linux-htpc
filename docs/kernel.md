@@ -53,7 +53,7 @@ Two scripts build the packages:
 | `kernel/build-in-container.sh 7.3.3-300.fc45 OUTPUT_DIR` | Builds in a Fedora container with podman. The build machine needs no Fedora of the same release. |
 | `kernel/build-fedora.sh 7.3.3-300.fc45 OUTPUT_DIR` | Builds on a Fedora system of the same release. As root, it also installs the build dependencies. |
 | `kernel/newest-fedora-kernel.sh 45 OUTPUT_DIR` | Prints the newest kernel build of a Fedora release. It says whether the series fits its Linux version, and whether `OUTPUT_DIR` has the patched packages of this build. |
-| `kernel/vbt-hdmi-rate.py VBT [OUTPUT]` | Shows the HDMI rate limit in a VBT of the board firmware. With `OUTPUT`, it writes a copy with the platform maximum. [hardware.md](hardware.md) describes when the copy helps and how the kernel loads it. |
+| `kernel/vbt-hdmi-rate.py VBT [OUTPUT] [--level-shift ENTRY]` | Shows the HDMI rate limit and the HDMI level shift in a VBT of the board firmware. With `OUTPUT`, it writes a copy with the platform maximum, and with `--level-shift`, also with another entry of the swing table. [hardware.md](hardware.md) describes when the copy helps and how the kernel loads it. |
 
 dnf downloads the source package and checks its signature. Inside a container, the crypto API of the host kernel can lack `hmac(sha512)`, which `kernel.spec` needs for the FIPS checksum of the kernel image. Then the build uses `kernel/sha512hmac-fallback.py`, which writes the same checksum. The build leaves out the parts that an HTPC does not use, for example the debug kernel, `perf` and the tools. The build files stay in `~/.cache/x86-linux-htpc/`.
 
