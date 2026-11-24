@@ -17,6 +17,7 @@ for target in sleep suspend hibernate hybrid-sleep; do
 done
 remove_file "$(htpc_user_home)/.config/environment.d/x86-linux-htpc-kwin.conf"
 disable_user_service htpc-display.service
+remove_file /usr/local/libexec/x86-linux-htpc/display-mode
 
 kwin_script=x86-linux-htpc-home
 run_as_htpc_user busctl --user call org.kde.KWin /Scripting org.kde.kwin.Scripting \

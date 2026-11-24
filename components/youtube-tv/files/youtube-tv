@@ -210,17 +210,22 @@ class Display:
 
     def matching_mode(self, output, fps):
         """The mode with the size of the current mode and the frame rate, or
-        two times the frame rate."""
+        two times the frame rate. A TV can offer two modes with the same
+        rate, and the current one stays, so the TV does not sync for
+        nothing."""
         modes = {m["id"]: m for m in output.get("modes", [])}
         current = modes.get(output.get("currentModeId"))
         if not current:
             return None
         for factor in (1, 2):
             target = fps * factor
-            for mode in modes.values():
-                if (mode["size"] == current["size"]
-                        and abs(mode["refreshRate"] - target) / target <= RATE_TOLERANCE):
-                    return mode
+            matches = [mode for mode in modes.values()
+                       if mode["size"] == current["size"]
+                       and abs(mode["refreshRate"] - target) / target <= RATE_TOLERANCE]
+            if current in matches:
+                return current
+            if matches:
+                return matches[0]
         return None
 
     def changes(self, fps, hdr):

@@ -115,7 +115,8 @@ for o in json.load(sys.stdin)["outputs"]:
         width, height, rate = re.fullmatch(r"(\d+)x(\d+)@([\d.]+)", mode).groups()
         if (current["size"]["width"], current["size"]["height"]) != (int(width), int(height)):
             sys.exit(1)
-        if abs(current["refreshRate"] - float(rate)) > 0.5:
+        # 59.94 and 60 differ by 0.1 %, so they do not match each other.
+        if abs(current["refreshRate"] - float(rate)) / float(rate) > 0.0005:
             sys.exit(1)
     sys.exit(0)
 sys.exit(1)

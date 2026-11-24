@@ -13,6 +13,7 @@ require_root
 component_dir="$(dirname "${BASH_SOURCE[0]}")"
 session_name="plasma-bigscreen-wayland"
 kwin_script=x86-linux-htpc-home
+display_mode_program=/usr/local/libexec/x86-linux-htpc/display-mode
 
 # Plasma Login Manager is based on SDDM and reads the same [Autologin]
 # keys, each from its own drop-in folder.
@@ -187,21 +188,25 @@ CONF
 # output mode and HDR from the configuration file at each login, so a
 # change in the display settings of Plasma does not stay.
 install_display_service() {
-	local output mode hdr arguments folder unit
+	local output mode hdr hdr_action command folder unit
 	output="$(config_require HDMI_OUTPUT)"
 	mode="$(config_get DISPLAY_MODE)"
 	hdr="$(config_get DISPLAY_HDR no)"
-	arguments=""
+	case "${hdr}" in
+	yes) hdr_action=enable ;;
+	no) hdr_action=disable ;;
+	*) fail "DISPLAY_HDR must be yes or no." ;;
+	esac
 	if [[ -n "${mode}" ]]; then
 		[[ "${mode}" =~ ^[0-9]+x[0-9]+@[0-9.]+$ ]] ||
 			fail "DISPLAY_MODE must be WIDTHxHEIGHT@RATE, for example 3840x2160@60."
-		arguments+=" output.${output}.mode.${mode}"
+		# The program picks the mode with the exact rate. The name of a
+		# mode in kscreen-doctor has the rounded rate only.
+		install_file "${component_dir}/files/display-mode" "${display_mode_program}" 0755
+		command="${display_mode_program} ${output} ${mode} ${hdr}"
+	else
+		command="/usr/bin/kscreen-doctor output.${output}.hdr.${hdr_action}"
 	fi
-	case "${hdr}" in
-	yes) arguments+=" output.${output}.hdr.enable" ;;
-	no) arguments+=" output.${output}.hdr.disable" ;;
-	*) fail "DISPLAY_HDR must be yes or no." ;;
-	esac
 	# enable_user_service takes the unit name from the file name.
 	folder="$(mktemp -d)"
 	unit="${folder}/htpc-display.service"
@@ -214,7 +219,7 @@ PartOf=graphical-session.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/kscreen-doctor${arguments}
+ExecStart=${command}
 
 [Install]
 WantedBy=graphical-session.target

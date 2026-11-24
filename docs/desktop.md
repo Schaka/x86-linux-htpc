@@ -17,7 +17,7 @@ The TV interface is KDE Plasma Bigscreen. It is a Plasma session for TVs, with l
 
 ## Display
 
-At each login, the user service `htpc-display.service` of the component `bigscreen` sets the output mode from the configuration file: the resolution and the refresh rate from `DISPLAY_MODE`, and HDR from `DISPLAY_HDR`. It uses `kscreen-doctor`. A change in the display settings of Plasma lasts until the next login. The players change the refresh rate for each video. [video.md](video.md) explains this.
+At each login, the user service `htpc-display.service` of the component `bigscreen` sets the output mode from the configuration file: the resolution and the refresh rate from `DISPLAY_MODE`, and HDR from `DISPLAY_HDR`. It uses `kscreen-doctor` and selects the mode by its ID, because the name of a mode has the rounded rate only. So `3840x2160@60` gets 60 Hz and not 59.94 Hz. If the TV offers two modes with the rate, the service keeps the current one. A change in the display settings of Plasma lasts until the next login. The players change the refresh rate for each video. [video.md](video.md) explains this.
 
 ## Launcher entries
 

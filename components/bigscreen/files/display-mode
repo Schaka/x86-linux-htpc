@@ -1,0 +1,61 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Sets the output mode and HDR of the TV.
+#
+#   display-mode OUTPUT WIDTHxHEIGHT@RATE yes|no
+#
+# kscreen-doctor names a mode by its size and its rounded rate, so the name
+# 3840x2160@60 can also select the mode with 59.94 Hz. This program picks
+# the mode by its ID: the current mode if it has the size and the rate,
+# else the preferred mode of the TV, else the first one.
+import json
+import re
+import subprocess
+import sys
+
+# 59.94 and 60 differ by 0.1 %, so they do not match each other.
+RATE_TOLERANCE = 0.0005
+
+
+def output_info(name):
+    result = subprocess.run(["kscreen-doctor", "-j"], capture_output=True, text=True)
+    if result.returncode != 0:
+        sys.exit(f"kscreen-doctor failed: {result.stderr.strip()}")
+    for output in json.loads(result.stdout).get("outputs", []):
+        if output.get("name") == name:
+            return output
+    sys.exit(f"The output {name} does not exist.")
+
+
+def matching_mode_id(output, width, height, rate):
+    matches = [mode["id"] for mode in output.get("modes", [])
+               if mode["size"] == {"width": width, "height": height}
+               and abs(mode["refreshRate"] - rate) / rate <= RATE_TOLERANCE]
+    for choice in (output.get("currentModeId"), *output.get("preferredModes", [])):
+        if choice in matches:
+            return choice
+    return matches[0] if matches else None
+
+
+def main():
+    if len(sys.argv) != 4 or sys.argv[3] not in ("yes", "no"):
+        sys.exit("Usage: display-mode OUTPUT WIDTHxHEIGHT@RATE yes|no")
+    name, mode, hdr = sys.argv[1:]
+    match = re.fullmatch(r"(\d+)x(\d+)@([\d.]+)", mode)
+    if not match:
+        sys.exit("The mode must be WIDTHxHEIGHT@RATE, for example 3840x2160@60.")
+    width, height, rate = int(match[1]), int(match[2]), float(match[3])
+    output = output_info(name)
+    arguments = []
+    mode_id = matching_mode_id(output, width, height, rate)
+    if mode_id is None:
+        print(f"The TV has no mode {mode}. The mode stays.", file=sys.stderr)
+    else:
+        arguments.append(f"output.{name}.mode.{mode_id}")
+    arguments.append(f"output.{name}.hdr.{'enable' if hdr == 'yes' else 'disable'}")
+    sys.exit(subprocess.run(["kscreen-doctor", *arguments]).returncode)
+
+
+if __name__ == "__main__":
+    main()
