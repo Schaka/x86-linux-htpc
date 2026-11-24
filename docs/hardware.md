@@ -96,7 +96,7 @@ A low value can come from the board wiring, or the maker can set it to be safe. 
 2. Show the limit with `kernel/vbt-hdmi-rate.py vbt.bin`. If it shows "platform maximum", the firmware sets no limit, and these steps do not apply.
 3. Write a copy with the platform maximum: `kernel/vbt-hdmi-rate.py vbt.bin vbt-hdmi.bin`.
 4. Install the copy into `/usr/lib/firmware/`. `i915` starts from the initramfs, so add the copy to it with `install_items` in a file in `/etc/dracut.conf.d/`. Run `dracut -f`.
-5. Add the boot option `i915.vbt_firmware=` with the path of the copy relative to `/usr/lib/firmware`, for example with `grubby --update-kernel=ALL --args=`.
+5. Add the boot option `i915.vbt_firmware=` with the path of the copy relative to `/usr/lib/firmware`, for example with `grubby --update-kernel=ALL --args=`. This command changes only the kernels that are installed. On Fedora, also add the option to `/etc/kernel/cmdline` and to `GRUB_CMDLINE_LINUX` in `/etc/default/grub`, so that each kernel that you install later gets it. Without the option, the kernel keeps the firmware limit, and Dolby Vision at 4K 60 Hz fails.
 6. After the reboot, make sure that `/sys/kernel/debug/dri/0/i915_vbt` is the same as the copy.
 7. Run a 4K 60 Hz RGB mode. Read the SCDC status of the sink with `i2cget` on the DDC bus of the connector, address 0x54. With the clock and the three data channels locked, register 0x40 is 0x0f. The error counters in registers 0x50 to 0x55 stay at 0 on a clean link.
 

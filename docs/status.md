@@ -8,16 +8,16 @@ This page lists the features of version 1.0.0-beta7. [hardware.md](hardware.md) 
 |---|---|---|
 | Plasma Bigscreen with automatic login, home screen tiles, no screen lock and no suspend | Works | |
 | Casts from Jellyfin clients to `jellyfin-mpv-shim`, and its library browser | Works | |
-| Dolby Vision profile 5, 8.1 and 7 FEL with the CB1 mpv | Not verified | 4K up to 60 Hz. Needs the patched kernel. |
+| Dolby Vision profile 5, 8.1 and 7 FEL with the CB1 mpv | Works | 4K up to 60 Hz. Needs the patched kernel. |
 | Dolby Vision profile 7 MEL without an enhancement layer stream, with the CB1 mpv | Not verified | Plays with the RPU of each picture |
-| HDR10 and SDR with the CB1 mpv | Not verified | |
+| HDR10 and SDR with the CB1 mpv | Works | |
 | HDR10+ | Not verified | Needs a TV with HDR10+ |
 | Refresh rate for each video | Works | In the CB1 mpv, the mpv of the distribution, Kodi and VacuumTube |
 | Audio passthrough of Dolby Digital, Dolby Digital Plus, Dolby TrueHD, Dolby Atmos, DTS and DTS-HD, and PCM 7.1 | Works | With `snd-hda-intel`. SOF with IPC3 passes no compressed audio. |
 | YouTube with HDR in VacuumTube | Works | 4K HDR at 60 fps drops frames on an N100 class GPU |
 | SmartTube in Waydroid | Works | SDR only |
 | S0undTV for Twitch in Waydroid, with a proxy against the stream ads | Works | The previews on the home screen of S0undTV do not use the proxy, and can show ads |
-| Kodi with CB1 and the add-on "Jellyfin for Kodi" | Not verified | Dolby Vision profile 5, 8.1 and 7 FEL, and Dolby Atmos. |
+| Kodi with CB1 and the add-on "Jellyfin for Kodi" | Works | Dolby Vision profile 5, 8.1 and 7 FEL, and Dolby Atmos. |
 | Air mouse: OK as a click or as Enter, Back as Back | Works | |
 | Wake-on-LAN of the TV at login and at each video | Works | The TV must support a network wake from standby |
 | Power key of the remote turns the TV and the AV receiver on and off | Works | [power-key.md](power-key.md). The HTPC itself stays on. Both routes work: a Home Assistant webhook, and the HTPC alone with Wake-on-LAN and commands. The HTPC alone needs a command for each device ([device-commands.md](device-commands.md)). A remote whose power button works by infrared needs another key. |
