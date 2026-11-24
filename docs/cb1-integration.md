@@ -86,6 +86,7 @@ When TV-led Dolby Vision starts, Kodi saves the current values and sets these pr
 |---|---|---|
 | Connector | `DVBRIDGE_DV_STANDARD_LAB` | 1 |
 | Connector | `DVBRIDGE_HDR10_DEEP_COLOR` | 0 |
+| Connector | `CB1_LLDV_FORMAT` | Off |
 | Connector | `HDR_OUTPUT_METADATA` | 0 (no blob) |
 | Connector | `max bpc` | 8 |
 | Connector | `Broadcast RGB` | Full |
@@ -95,6 +96,8 @@ When TV-led Dolby Vision starts, Kodi saves the current values and sets these pr
 | Plane | `rotation` | 0 degrees |
 | Plane | `alpha` | 65535 (opaque) |
 | Plane | `pixel blend mode` | None |
+
+The kernel keeps `DVBRIDGE_DV_STANDARD_LAB`, `DVBRIDGE_HDR10_DEEP_COLOR` and `CB1_LLDV_FORMAT` after the player ends. If a player ends without its restore, for example in a crash, the connector stays in the Dolby Vision mode. A compositor such as KWin does not change properties that it does not know. So Kodi turns these properties off in its first SDR modeset. If the CB1 mpv starts without `--drm-dvbridge`, it turns them off. At the end of a CB1 mode, it sets them to 0.
 
 If another plane is active on the same CRTC, Kodi does not start Dolby Vision. [kernel.md](kernel.md) describes the properties of the patched kernel.
 
@@ -131,7 +134,7 @@ mpv 0.41 has all the parts that the integration needs. Four patches in `mpv/patc
 | Enhancement layer | `video/decode/vd_lavc.c`, `video/decode/cb1_fel.c`, `demux/demux_mkv.c` | `--vd-lavc-dovi-fel` starts the EL decoder for a profile 7 stream with VA-API. Each base layer picture waits in `cb1_fel.c` until its EL picture is decoded, and then carries it in the new field `dovi_el` of `mp_image`. The hardware frame pool gets 16 more surfaces for the waiting pictures. If the EL fails, the video plays without it and mpv logs an error. A MEL picture that needs no EL picture plays without one. The adapter imports the EL picture and logs `CB1 enhancement layer: FEL` or `MEL`. |
 | Output | `video/out/vo_gpu_next.c` | Give CB1 the texture of the swapchain frame (`swframe.fbo`) as the output texture. Draw no OSD over the picture in the first version. Later, the OSD goes through the overlay calls of CB1. |
 | Commit | `video/out/vo_gpu_next.c`, function `flip_page` | After the swap of a CB1 picture, the adapter calls `dvbridge_render_commit`. If the picture was not presented, it resets the renderer. |
-| Connector state | `video/out/drm_atomic.c`, `video/out/drm_common.c` | `drm_atomic_stage_dvbridge` saves the values of the table above and adds the new values to the modeset commit. In every mode, `drm_atomic_stage_other_planes_off` turns off all other planes on the CRTC, for example a cursor plane that a compositor left on. Without it, the pointer of Plasma stays over the picture of mpv. In the Dolby Vision mode, the DRM output then sends no HDR metadata of its own. In the HDR10 mode, the color space of the CB1 picture goes into the target parameters of the frame. The normal HDR code of the DRM output then sets the metadata, the colorspace and `DVBRIDGE_HDR10_DEEP_COLOR` in one commit. If a test commit shows that the mode has no 10-bit link, the output stays HDR10 with 8 bits and logs a warning. At the end of playback and at a VT switch, a commit of its own sets the saved values back. For the blob properties, it sets no blob. Then mpv restores the old mode. `HDR10PLUS_METADATA` for HDR10+ output is open. |
+| Connector state | `video/out/drm_atomic.c`, `video/out/drm_common.c` | `drm_atomic_stage_dvbridge` saves the values of the table above and adds the new values to the modeset commit. In every mode, `drm_atomic_stage_other_planes_off` turns off all other planes on the CRTC, for example a cursor plane that a compositor left on. Without it, the pointer of Plasma stays over the picture of mpv. In the Dolby Vision mode, the DRM output then sends no HDR metadata of its own. In the HDR10 mode, the color space of the CB1 picture goes into the target parameters of the frame. The normal HDR code of the DRM output then sets the metadata, the colorspace and `DVBRIDGE_HDR10_DEEP_COLOR` in one commit. If a test commit shows that the mode has no 10-bit link, the output stays HDR10 with 8 bits and logs a warning. At the end of playback and at a VT switch, a commit of its own sets the saved values back. For the blob properties, it sets no blob, and the CB1 transport properties go to 0. Then mpv restores the old mode. Without `--drm-dvbridge`, the DRM output turns off a CB1 transport that an earlier owner left on. `HDR10PLUS_METADATA` for HDR10+ output is open. |
 | Output format | `video/out/opengl/context_drm_egl.c` and the options of mpv | CB1 needs a render target with four 8-bit channels, and the kernel accepts Dolby Vision only on an XRGB8888 plane. mpv renders into an ARGB8888 surface and shows the same buffer as an XRGB8888 framebuffer, as Kodi does. The HDR10 mode needs `drm-format=xrgb2101010`. Further options: `dither-depth=no` and the display mode of the video (`drm-mode`). |
 
 For single-layer files, the decoder of mpv needs no change, because mpv uses the FFmpeg that it links. With the patched FFmpeg, the side data has the fields of CB1.
