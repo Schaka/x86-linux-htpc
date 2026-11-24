@@ -4,6 +4,8 @@
 # Installs the CB1 build: FFmpeg, libplacebo and the CB1 engine with their
 # patches, and the CB1 mpv, all in /opt/x86-linux-htpc/cb1. The archive comes
 # from cb1/build-in-container.sh. The libraries of the distribution stay.
+# Also installs a user service that gives the screen back to Plasma when a
+# CB1 player on its own VT crashes.
 set -euo pipefail
 # shellcheck source=../../lib/htpc.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../../lib/htpc.sh"
@@ -30,5 +32,14 @@ install_build() {
 	info "Installed the CB1 build from $(basename "${archive}")"
 }
 
+install_screen_guard() {
+	install_file "${component_dir}/files/screen-guard" /usr/local/libexec/x86-linux-htpc/screen-guard 0755
+	enable_user_service "${component_dir}/files/htpc-screen-guard.service"
+	# The service reads its program at its start. Without a running session,
+	# the service starts with the next login.
+	run_as_htpc_user systemctl --user restart htpc-screen-guard.service 2>/dev/null || true
+}
+
 install_packages "${component_dir}"
 install_build
+install_screen_guard

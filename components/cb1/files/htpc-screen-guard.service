@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Written by the component cb1 of x86-linux-htpc.
+[Unit]
+Description=Gives the screen back to Plasma after a CB1 player crash (x86-linux-htpc)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+# logind allows the VT switch to the user of the local session, so the
+# guard runs as a user service of that session.
+ExecStart=/usr/local/libexec/x86-linux-htpc/screen-guard
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

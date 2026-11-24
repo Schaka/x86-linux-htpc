@@ -18,8 +18,18 @@ uses_own_libraries() {
 	ldd "${prefix}/bin/mpv" 2>/dev/null | grep -q "libplacebo.* => ${prefix}/lib/"
 }
 
+guard_enabled() {
+	[[ -L "$(htpc_user_home)/.config/systemd/user/graphical-session.target.wants/htpc-screen-guard.service" ]]
+}
+
+guard_active() {
+	run_as_htpc_user systemctl --user is-active --quiet htpc-screen-guard.service
+}
+
 check "The CB1 mpv starts" mpv_runs
 check "The CB1 mpv finds all its libraries" libraries_found
 check "The CB1 mpv uses the patched libplacebo" uses_own_libraries
+check "The screen guard starts with the Plasma session" guard_enabled
+check "The screen guard runs" guard_active
 
 checks_done

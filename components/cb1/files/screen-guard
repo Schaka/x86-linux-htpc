@@ -1,0 +1,119 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Gives the screen back to Plasma when a CB1 player on its own VT ends
+# without the switch back.
+#
+# The CB1 mpv and Kodi draw on their own VT, above the VTs 1 to 6 of the
+# login prompts. When they end, their scripts switch back to the VT of
+# Plasma. A player that crashes or gets killed cannot do this, and the TV
+# stays black. This service reads the VT in front every few seconds. If a
+# VT above 6 stays in front with no player, it switches to Plasma.
+import os
+import subprocess
+import syslog
+import time
+
+CHECK_INTERVAL = 2.0
+# A player can need some seconds between the VT switch and its start, for
+# example Kodi after its launcher switched the VT.
+GRACE_TIME = 10.0
+LAST_LOGIN_PROMPT_VT = 6
+PLAYER_PROGRAMS = (
+    "/opt/x86-linux-htpc/cb1/bin/mpv",
+    "/opt/x86-linux-htpc/kodi/",
+)
+# The Kodi launcher switches back by itself when Kodi ends.
+KODI_LAUNCHER = "/usr/local/libexec/x86-linux-htpc/kodi-dv"
+
+
+def active_vt():
+    try:
+        with open("/sys/class/tty/tty0/active") as f:
+            return int(f.read().strip().removeprefix("tty"))
+    except (OSError, ValueError):
+        return 0
+
+
+def plasma_vt():
+    """The VT of the graphical session of this user"""
+    def logind(*args):
+        result = subprocess.run(["loginctl", *args, "--value"], capture_output=True, text=True)
+        return result.stdout.strip()
+    session = logind("show-user", str(os.getuid()), "-p", "Display")
+    vt = logind("show-session", session, "-p", "VTNr") if session else ""
+    return int(vt) if vt.isdigit() else 0
+
+
+def is_player(pid):
+    try:
+        program = os.readlink(f"/proc/{pid}/exe")
+    except OSError:
+        return False
+    if program.startswith(PLAYER_PROGRAMS):
+        return True
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            arguments = f.read().split(b"\0")
+    except OSError:
+        return False
+    return KODI_LAUNCHER.encode() in arguments
+
+
+def player_runs():
+    # Only the processes of this user are readable, and the players run as
+    # this user.
+    return any(is_player(name) for name in os.listdir("/proc") if name.isdigit())
+
+
+def switch_to(vt):
+    # logind allows the switch to the user of a local session.
+    result = subprocess.run(
+        ["busctl", "call", "org.freedesktop.login1", "/org/freedesktop/login1/seat/seat0",
+         "org.freedesktop.login1.Seat", "SwitchTo", "u", str(vt)],
+        capture_output=True, text=True, timeout=10)
+    if result.returncode != 0:
+        syslog.syslog(syslog.LOG_WARNING, f"Cannot switch to VT {vt}: {result.stderr.strip()}")
+        return False
+    return True
+
+
+def show_home():
+    """The KWin script of the component bigscreen closes the launch screen of
+    a tile and gives the focus to the home screen. Without the script, the
+    call changes nothing."""
+    subprocess.run(
+        ["busctl", "--user", "call", "org.kde.kglobalaccel", "/component/kwin",
+         "org.kde.kglobalaccel.Component", "invokeShortcut", "s", "x86-linux-htpc show home"],
+        capture_output=True, timeout=10)
+
+
+def stranded_vt():
+    """The VT in front if it is a player VT without a player, else 0"""
+    vt = active_vt()
+    if vt <= LAST_LOGIN_PROMPT_VT or vt == plasma_vt() or player_runs():
+        return 0
+    return vt
+
+
+def main():
+    stranded_since = None
+    while True:
+        vt = stranded_vt()
+        now = time.monotonic()
+        if not vt:
+            stranded_since = None
+        elif stranded_since is None:
+            stranded_since = now
+        elif now - stranded_since >= GRACE_TIME:
+            target = plasma_vt()
+            if target and switch_to(target):
+                syslog.syslog(syslog.LOG_INFO,
+                              f"VT {vt} had no player, so Plasma on VT {target} got the screen back")
+                show_home()
+            stranded_since = None
+        time.sleep(CHECK_INTERVAL)
+
+
+if __name__ == "__main__":
+    main()

@@ -18,6 +18,7 @@ This page lists the features of version 1.0.0-beta7. [hardware.md](hardware.md) 
 | SmartTube in Waydroid | Works | SDR only |
 | S0undTV for Twitch in Waydroid, with a proxy against the stream ads | Works | The previews on the home screen of S0undTV do not use the proxy, and can show ads |
 | Kodi with CB1 and the add-on "Jellyfin for Kodi" | Works | Dolby Vision profile 5, 8.1 and 7 FEL, and Dolby Atmos. |
+| Plasma gets the screen back after a crash of the CB1 mpv or Kodi | Works | After about 10 seconds. [players.md](players.md#the-screen-after-a-player-crash) |
 | Air mouse: OK as a click or as Enter, Back as Back | Works | |
 | Wake-on-LAN of the TV at login and at each video | Works | The TV must support a network wake from standby |
 | Power key of the remote turns the TV and the AV receiver on and off | Works | [power-key.md](power-key.md). The HTPC itself stays on. Both routes work: a Home Assistant webhook, and the HTPC alone with Wake-on-LAN and commands. The HTPC alone needs a command for each device ([device-commands.md](device-commands.md)). A remote whose power button works by infrared needs another key. |
